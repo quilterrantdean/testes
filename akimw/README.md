@@ -30,3 +30,21 @@ Opções usadas: `-a` (endereço em comentário), `-t` (bytes originais em hex+A
 - O `z80dasm` assinalou "*Self-modifying code detected*" em todos os bancos — isto é uma heurística da ferramenta (detecta escrita em endereços que também foram desmontados como código), não uma confirmação absoluta; é comum em jogos SMS por causa da mistura código/dados mencionada acima.
 - Os endereços absolutos usados em `JP`/`CALL` dentro dos bancos 3 a 7 só correspondem à realidade **se** esse banco estiver de facto paginado no slot 2 (`0x8000-0xBFFF`) nesse momento da execução. Não confirmei isto por trace de execução — é a convenção mais comum, mas alguns jogos também paginam bancos extra no slot 1.
 - Ainda não identifiquei qual é este jogo (código de produto em branco) — se quiseres, calculo o checksum e comparo com bases de dados públicas tipo No-Intro/SMS Power para tentar identificá-lo.
+
+## Compilação da porta C para Windows XP
+
+O ponto de entrada é o directório `akimw`: não é necessário entrar em
+`recomp/`. Num terminal `sh` do w64devkit, execute exactamente:
+
+```sh
+cd C:/dev/repos/testes/akimw
+make
+```
+
+Isto delega a compilação em `recomp/` e cria `recomp/akimw_recomp.exe`. Para
+voltar a gerar a imagem C da ROM a partir dos ficheiros `bank*.asm`, execute
+`make transpile`. `tools/transpile.py` é um ficheiro Python; não deve ser
+colado linha a linha no interpretador de comandos. Se pretender executá-lo
+directamente, use `python recomp/tools/transpile.py` a partir deste
+directório. O w64devkit fornece habitualmente o comando `python`, e não
+`python3`.

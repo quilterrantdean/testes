@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+vdp_test
+vdp_test.exe
