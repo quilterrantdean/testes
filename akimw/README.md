@@ -45,5 +45,6 @@ Isto delega a compilação em `recomp/` e cria `recomp/akimw_recomp.exe`. Para
 voltar a gerar a imagem C da ROM a partir dos ficheiros `bank*.asm`, execute
 `make transpile`. `tools/transpile.py` é um ficheiro Python; não deve ser
 colado linha a linha no interpretador de comandos. Se pretender executá-lo
-directamente, use `python3 recomp/tools/transpile.py` a partir deste
-Directório.
+directamente, use `python recomp/tools/transpile.py` a partir deste
+directório. O w64devkit fornece habitualmente o comando `python`, e não
+`python3`.

@@ -23,7 +23,8 @@ e traduzir VDP/PSG e entrada para o framebuffer.
 
 ## Construção
 
-É necessário um MinGW de 32 bits, por exemplo `i686-w64-mingw32-gcc`:
+É necessário um MinGW de 32 bits e Python. No w64devkit, use o comando
+`python` (não `python3`):
 
 ```sh
 cd akimw
