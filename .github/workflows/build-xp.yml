@@ -29,11 +29,21 @@ jobs:
             make \
             git
 
+      - name: Limpar ficheiros compilados residuais
+        run: |
+          # Elimina ficheiros .o, .d e configuracoes locais que tenham sido submetidos para o git
+          rm -f *.o *.d *.exe config.h config.mak config.log codecs.conf.h version.h
+          rm -f */*.o */*.d */*/*.o */*/*.d
+
       - name: Assegurar presenca do FFmpeg
         run: |
           if [ ! -d "ffmpeg" ]; then
             git clone -b master --depth 1 https://github.com/sherpya/FFmpeg.git ffmpeg
           fi
+
+      - name: Atribuir permissoes de execucao aos scripts
+        run: |
+          chmod +x configure version.sh help/*.sh 2>/dev/null || true
 
       - name: Aplicar correccoes de compatibilidade para Windows XP
         run: |
