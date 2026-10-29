@@ -6,6 +6,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  # Prefixo das dependencias estaticas (fora do sysroot do mingw, para poder ser colocado em cache)
+  DEPS: /home/runner/deps
+  DEPS_CPPFLAGS: -D_WIN32_WINNT=0x0501 -DWINVER=0x0501 -DXML_STATIC
+  DEPS_CFLAGS: -O2 -mtune=prescott
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -31,7 +37,11 @@ jobs:
             pkg-config \
             libtool \
             autoconf \
-            automake
+            automake \
+            gperf \
+            curl \
+            xz-utils \
+            fonts-dejavu-core
 
       - name: Limpar ficheiros compilados residuais
         run: |
@@ -56,29 +66,92 @@ jobs:
           # 2. Define a constante ausente do FFmpeg para cabecalhos do XP
           sed -i '1i #ifndef WC_ERR_INVALID_CHARS\n#define WC_ERR_INVALID_CHARS 0x00000080\n#endif' ffmpeg/libavutil/wchar_filename.h
 
-      - name: Compilar FreeType estatico (sem dependencias externas do Linux)
+      # ---------------------------------------------------------------
+      # Dependencias de OSD/legendas: iconv + expat + FreeType + fontconfig
+      # (a chave da cache muda sempre que qualquer workflow for alterado)
+      # ---------------------------------------------------------------
+      - name: Cache das dependencias estaticas
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/deps
+          key: deps-i686-xp-${{ hashFiles('.github/workflows/*.yml') }}
+
+      - name: Compilar dependencias estaticas (iconv, expat, FreeType, fontconfig)
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        shell: bash
         run: |
-          git clone --depth 1 https://gitlab.freedesktop.org/freetype/freetype.git
+          set -euxo pipefail
+          HOST=i686-w64-mingw32
+          SRC="$RUNNER_TEMP/src"
+          mkdir -p "$SRC" "$DEPS"
+
+          export CPPFLAGS="$DEPS_CPPFLAGS -I$DEPS/include"
+          export CFLAGS="$DEPS_CFLAGS"
+          export LDFLAGS="-L$DEPS/lib"
+          # Isola do pkg-config do sistema anfitriao (evita apanhar libs de Linux)
+          export PKG_CONFIG_LIBDIR="$DEPS/lib/pkgconfig"
+          unset PKG_CONFIG_PATH
+
+          # --- libiconv ---
+          cd "$SRC"
+          curl -fsSL https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.17.tar.gz | tar xz
+          cd libiconv-1.17
+          ./configure --host=$HOST --prefix="$DEPS" \
+            --enable-static --disable-shared --disable-nls
+          make -j"$(nproc)"
+          make install
+
+          # --- expat ---
+          cd "$SRC"
+          curl -fsSL https://github.com/libexpat/libexpat/releases/download/R_2_6_4/expat-2.6.4.tar.xz | tar xJ
+          cd expat-2.6.4
+          ./configure --host=$HOST --prefix="$DEPS" \
+            --enable-static --disable-shared \
+            --without-docbook --without-examples --without-tests
+          make -j"$(nproc)"
+          make install
+
+          # --- FreeType (versao fixa; instala o freetype-config que o configure do MPlayer procura) ---
+          cd "$SRC"
+          git clone --depth 1 --branch VER-2-13-3 https://gitlab.freedesktop.org/freetype/freetype.git
           cd freetype
           ./autogen.sh
-          PKG_CONFIG="false" ./configure \
-            --host=i686-w64-mingw32 \
-            --prefix=/usr/i686-w64-mingw32 \
-            --enable-static \
-            --disable-shared \
-            --without-zlib \
-            --without-bzip2 \
-            --without-png \
-            --without-harfbuzz \
-            --without-brotli
-          make -j$(nproc)
-          sudo make install
-          cd ..
-          rm -rf freetype
+          PKG_CONFIG="false" ./configure --host=$HOST --prefix="$DEPS" \
+            --enable-static --disable-shared \
+            --enable-freetype-config \
+            --without-zlib --without-bzip2 --without-png \
+            --without-harfbuzz --without-brotli
+          make -j"$(nproc)"
+          make install
+
+          # --- fontconfig ---
+          cd "$SRC"
+          curl -fsSL https://www.freedesktop.org/software/fontconfig/release/fontconfig-2.14.2.tar.xz | tar xJ
+          cd fontconfig-2.14.2
+          ./configure --host=$HOST --prefix="$DEPS" \
+            --enable-static --disable-shared \
+            --disable-docs --disable-nls --disable-cache-build \
+            --with-expat="$DEPS"
+          make -j"$(nproc)"
+          make install
+
+          # Em ligacao estatica o pkg-config nao inclui Libs.private: acrescentar o expat
+          sed -i 's|^Libs:.*|& -lexpat|' "$DEPS/lib/pkgconfig/fontconfig.pc"
+
+          # Verificar que tudo o que e preciso ficou instalado
+          ls -l "$DEPS/lib/libiconv.a" "$DEPS/lib/libexpat.a" \
+                "$DEPS/lib/libfreetype.a" "$DEPS/lib/libfontconfig.a" \
+                "$DEPS/bin/freetype-config" "$DEPS/etc/fonts/fonts.conf"
 
       - name: Executar configure do MPlayer
+        shell: bash
         run: |
-          export PKG_CONFIG_PATH="/usr/i686-w64-mingw32/lib/pkgconfig"
+          export PKG_CONFIG_LIBDIR="$DEPS/lib/pkgconfig"
+          unset PKG_CONFIG_PATH
+          # freetype-config e procurado no PATH
+          export PATH="$DEPS/bin:$PATH"
+          # FreeType e fontconfig ficam em modo automatico: o passo seguinte falha se nao forem detectados
           ./configure \
             --enable-cross-compile \
             --target=i686-mingw32 \
@@ -93,7 +166,6 @@ jobs:
             --disable-gui \
             --enable-static \
             --enable-fastmemcpy \
-            --enable-freetype \
             --enable-win32dll \
             --enable-directx \
             --enable-direct3d \
@@ -113,8 +185,26 @@ jobs:
             --disable-fma3 \
             --disable-fma4 \
             --enable-runtime-cpudetection \
-            --extra-cflags="-O2 -march=prescott -mtune=prescott -DWINVER=0x0501 -D_WIN32_WINNT=0x0501 -DWC_ERR_INVALID_CHARS=0x00000080 -Wno-int-conversion -Wno-incompatible-pointer-types" \
-            --extra-ldflags="-static -static-libgcc -Wl,--subsystem,console:5.1"
+            --extra-cflags="-I$DEPS/include -O2 -march=prescott -mtune=prescott -DWINVER=0x0501 -D_WIN32_WINNT=0x0501 -DWC_ERR_INVALID_CHARS=0x00000080 -Wno-int-conversion -Wno-incompatible-pointer-types" \
+            --extra-ldflags="-L$DEPS/lib -static -static-libgcc -Wl,--subsystem,console:5.1" \
+            2>&1 | tee configure-out.txt
+
+      - name: Verificar deteccao de FreeType, fontconfig e iconv
+        shell: bash
+        run: |
+          echo "=== Linhas relevantes do configure ==="
+          grep -iE 'freetype|fontconfig|iconv' configure-out.txt || true
+          echo "=== config.h ==="
+          grep -E 'CONFIG_(FREETYPE|FONTCONFIG|ICONV|BITMAP_FONT)\b' config.h || true
+
+          falhou=0
+          for opt in FREETYPE FONTCONFIG; do
+            if ! grep -q "^#define CONFIG_${opt} 1" config.h; then
+              echo "::error::CONFIG_${opt} nao esta activo no config.h. Ver o artefacto 'diagnostico-configure' (config.log)."
+              falhou=1
+            fi
+          done
+          exit $falhou
 
       - name: Compilar
         run: make -j$(nproc)
@@ -124,10 +214,30 @@ jobs:
           i686-w64-mingw32-strip -s mplayer.exe
           i686-w64-mingw32-strip -s mencoder.exe
 
+      - name: Preparar pacote (executaveis, configuracao do fontconfig e fonte de reserva)
+        run: |
+          mkdir -p dist
+          cp mplayer.exe mencoder.exe dist/
+          # Configuracao do fontconfig (mesma estrutura do binario original: fonts/fonts.conf + fonts/conf.d)
+          cp -rL "$DEPS/etc/fonts" dist/fonts
+          # Fonte de reserva para o OSD (licenca livre)
+          cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf dist/subfont.ttf
+          ls -lR dist
+
       - name: Guardar executaveis (Artifacts)
         uses: actions/upload-artifact@v4
         with:
           name: mplayer-xp-prescott
+          path: dist
+
+      - name: Guardar diagnostico do configure (Artifacts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostico-configure
           path: |
-            mplayer.exe
-            mencoder.exe
+            config.log
+            configure-out.txt
+            config.h
+            config.mak
+          if-no-files-found: warn
