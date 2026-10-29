@@ -53,6 +53,15 @@ jobs:
           # 2. Define a constante ausente do FFmpeg para cabecalhos do XP
           sed -i '1i #ifndef WC_ERR_INVALID_CHARS\n#define WC_ERR_INVALID_CHARS 0x00000080\n#endif' ffmpeg/libavutil/wchar_filename.h
 
+      - name: Compilar FreeType estatico para MinGW
+        run: |
+          git clone --depth 1 https://gitlab.freedesktop.org/freetype/freetype.git
+          cd freetype
+          ./autogen.sh
+          ./configure --host=i686-w64-mingw32 --prefix=/usr/i686-w64-mingw32 --enable-static --disable-shared
+          make -j$(nproc)
+          sudo make install
+          
       - name: Executar configure
         run: |
           ./configure \
