@@ -1,0 +1,48 @@
+sub/vobsub.o: sub/vobsub.c config.h mpcommon.h m_config.h mpmem.h \
+ config.h m_option.h sub/subreader.h libmpdemux/demuxer.h stream/stream.h \
+ m_option.h mp_msg.h stream/url.h stream/network.h stream/stream.h \
+ stream/http.h sub/ass_mp.h sub/subreader.h libass/ass.h \
+ libass/ass_types.h sub/ass_mp.h sub/vobsub.h sub/spudec.h \
+ libvo/video_out.h libmpcodecs/img_format.h path.h sub/unrar_exec.h \
+ ffmpeg/libavutil/common.h ffmpeg/libavutil/attributes.h \
+ ffmpeg/libavutil/error.h ffmpeg/libavutil/macros.h \
+ ffmpeg/libavutil/avconfig.h ffmpeg/libavutil/version.h \
+ ffmpeg/libavutil/mem.h ffmpeg/libavutil/avstring.h \
+ ffmpeg/libavutil/intreadwrite.h ffmpeg/libavutil/bswap.h osdep/osdep.h
+config.h:
+mpcommon.h:
+m_config.h:
+mpmem.h:
+config.h:
+m_option.h:
+sub/subreader.h:
+libmpdemux/demuxer.h:
+stream/stream.h:
+m_option.h:
+mp_msg.h:
+stream/url.h:
+stream/network.h:
+stream/stream.h:
+stream/http.h:
+sub/ass_mp.h:
+sub/subreader.h:
+libass/ass.h:
+libass/ass_types.h:
+sub/ass_mp.h:
+sub/vobsub.h:
+sub/spudec.h:
+libvo/video_out.h:
+libmpcodecs/img_format.h:
+path.h:
+sub/unrar_exec.h:
+ffmpeg/libavutil/common.h:
+ffmpeg/libavutil/attributes.h:
+ffmpeg/libavutil/error.h:
+ffmpeg/libavutil/macros.h:
+ffmpeg/libavutil/avconfig.h:
+ffmpeg/libavutil/version.h:
+ffmpeg/libavutil/mem.h:
+ffmpeg/libavutil/avstring.h:
+ffmpeg/libavutil/intreadwrite.h:
+ffmpeg/libavutil/bswap.h:
+osdep/osdep.h:
