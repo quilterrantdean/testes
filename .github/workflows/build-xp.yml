@@ -1,0 +1,98 @@
+name: Compilar MPlayer para Windows XP (32-bits)
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Obter codigo-fonte
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Instalar ferramentas de compilacao cruzada
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-mingw-w64-i686 \
+            g++-mingw-w64-i686 \
+            binutils-mingw-w64-i686 \
+            yasm \
+            nasm \
+            make \
+            git
+
+      - name: Assegurar presenca do FFmpeg
+        run: |
+          if [ ! -d "ffmpeg" ]; then
+            git clone -b master --depth 1 https://github.com/sherpya/FFmpeg.git ffmpeg
+          fi
+
+      - name: Aplicar correccoes de compatibilidade para Windows XP
+        run: |
+          # 1. Impede a forca do subsistema Windows Vista no configure
+          sed -i 's/_WIN32_WINNT=0x0600/_WIN32_WINNT=0x0501/g' configure
+
+          # 2. Define a constante ausente do FFmpeg para cabecalhos do XP
+          sed -i '1i #ifndef WC_ERR_INVALID_CHARS\n#define WC_ERR_INVALID_CHARS 0x00000080\n#endif' ffmpeg/libavutil/wchar_filename.h
+
+      - name: Executar configure
+        run: |
+          ./configure \
+            --enable-cross-compile \
+            --target=i686-mingw32 \
+            --cc=i686-w64-mingw32-gcc \
+            --as=i686-w64-mingw32-as \
+            --ar=i686-w64-mingw32-ar \
+            --ranlib=i686-w64-mingw32-ranlib \
+            --windres=i686-w64-mingw32-windres \
+            --host-cc=gcc \
+            --with-arch=prescott \
+            --with-tune=prescott \
+            --disable-gui \
+            --enable-static \
+            --enable-fastmemcpy \
+            --enable-win32dll \
+            --enable-directx \
+            --enable-direct3d \
+            --enable-gl \
+            --enable-win32waveout \
+            --enable-mmx \
+            --enable-mmxext \
+            --enable-sse \
+            --enable-sse2 \
+            --enable-sse3 \
+            --disable-ssse3 \
+            --disable-sse4 \
+            --disable-sse42 \
+            --disable-avx \
+            --disable-avx2 \
+            --disable-xop \
+            --disable-fma3 \
+            --disable-fma4 \
+            --enable-runtime-cpudetection \
+            --extra-cflags="-O2 -march=prescott -mtune=prescott -DWINVER=0x0501 -D_WIN32_WINNT=0x0501 -DWC_ERR_INVALID_CHARS=0x00000080 -Wno-int-conversion -Wno-incompatible-pointer-types" \
+            --extra-ldflags="-static -static-libgcc -Wl,--subsystem,console:5.1"
+
+      - name: Compilar
+        run: make -j$(nproc)
+
+      - name: Reduzir tamanho dos executaveis (strip)
+        run: |
+          i686-w64-mingw32-strip -s mplayer.exe
+          i686-w64-mingw32-strip -s mencoder.exe
+
+      - name: Guardar executaveis (Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mplayer-xp-prescott
+          path: |
+            mplayer.exe
+            mencoder.exe
