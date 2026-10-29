@@ -27,11 +27,14 @@ jobs:
             yasm \
             nasm \
             make \
-            git
+            git \
+            pkg-config \
+            libtool \
+            autoconf \
+            automake
 
       - name: Limpar ficheiros compilados residuais
         run: |
-          # Elimina ficheiros .o, .d e configuracoes locais que tenham sido submetidos para o git
           rm -f *.o *.d *.exe config.h config.mak config.log codecs.conf.h version.h
           rm -f */*.o */*.d */*/*.o */*/*.d
 
@@ -53,17 +56,29 @@ jobs:
           # 2. Define a constante ausente do FFmpeg para cabecalhos do XP
           sed -i '1i #ifndef WC_ERR_INVALID_CHARS\n#define WC_ERR_INVALID_CHARS 0x00000080\n#endif' ffmpeg/libavutil/wchar_filename.h
 
-      - name: Compilar FreeType estatico para MinGW
+      - name: Compilar FreeType estatico (sem dependencias externas do Linux)
         run: |
           git clone --depth 1 https://gitlab.freedesktop.org/freetype/freetype.git
           cd freetype
           ./autogen.sh
-          ./configure --host=i686-w64-mingw32 --prefix=/usr/i686-w64-mingw32 --enable-static --disable-shared
+          PKG_CONFIG="false" ./configure \
+            --host=i686-w64-mingw32 \
+            --prefix=/usr/i686-w64-mingw32 \
+            --enable-static \
+            --disable-shared \
+            --without-zlib \
+            --without-bzip2 \
+            --without-png \
+            --without-harfbuzz \
+            --without-brotli
           make -j$(nproc)
           sudo make install
-          
-      - name: Executar configure
+          cd ..
+          rm -rf freetype
+
+      - name: Executar configure do MPlayer
         run: |
+          export PKG_CONFIG_PATH="/usr/i686-w64-mingw32/lib/pkgconfig"
           ./configure \
             --enable-cross-compile \
             --target=i686-mingw32 \
@@ -78,6 +93,7 @@ jobs:
             --disable-gui \
             --enable-static \
             --enable-fastmemcpy \
+            --enable-freetype \
             --enable-win32dll \
             --enable-directx \
             --enable-direct3d \
