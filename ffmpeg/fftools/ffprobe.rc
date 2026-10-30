@@ -1,4 +1,0 @@
-#define __MODULE__	    "ffprobe.exe"
-#define __ICON__	    "ffprobe.ico"
-#define __DESCRIPTION__ "Simple multimedia streams analyzer"
-#include <common.rc>
