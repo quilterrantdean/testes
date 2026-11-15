@@ -39,7 +39,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.XP_PREFIX }}
-          key: xp-tc-binutils${{ env.BINUTILS_VER }}-gcc${{ env.GCC_VER }}-mingw${{ env.MINGW_VER }}-prescott-xp-v1
+          key: xp-tc-binutils${{ env.BINUTILS_VER }}-gcc${{ env.GCC_VER }}-mingw${{ env.MINGW_VER }}-prescott-xp-v2
 
       - name: Build Windows XP MSVCRT P4-Prescott cross-toolchain (on cache miss)
         if: steps.cache-tc.outputs.cache-hit != 'true'
@@ -48,7 +48,7 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "${{ env.XP_PREFIX }}"
 
           WORK=/tmp/xp-tc-build
-          mkdir -p "${WORK}/src" "${WORK}/bld"
+          mkdir -p "${WORK}/src" "${WORK}/bld" "${WORK}/dlls"
           cd "${WORK}/src"
 
           curl -fsSL "https://ftp.gnu.org/gnu/binutils/binutils-${{ env.BINUTILS_VER }}.tar.xz" | tar -xJ
@@ -60,7 +60,8 @@ jobs:
 
           BUILD_TRIPLE="$(gcc -dumpmachine)"
           JOBS="$(nproc)"
-          XP_FLAGS="-O2 -march=prescott -mtune=prescott -D_WIN32_WINNT=0x0501 -DWINVER=0x0501 -DPSAPI_VERSION=1"
+          XP_ARCH_FLAGS="-O2 -march=prescott -mtune=prescott"
+          XP_FLAGS="${XP_ARCH_FLAGS} -D_WIN32_WINNT=0x0501 -DWINVER=0x0501 -DPSAPI_VERSION=1"
 
           mkdir -p "${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}"
           ln -sfn "${{ env.TARGET_TRIPLE }}" "${{ env.XP_PREFIX }}/mingw"
@@ -86,7 +87,7 @@ jobs:
             --with-default-msvcrt=msvcrt
           make install
 
-          # 3. GCC Stage 1 (C/C++ compiler + POSIX threads + DWARF2 + Prescott)
+          # 3. GCC Stage 1 (compilador C/C++ + POSIX threads + DWARF2 + Prescott)
           mkdir -p "${WORK}/bld/gcc" && cd "${WORK}/bld/gcc"
           "${WORK}/src/gcc-${{ env.GCC_VER }}/configure" \
             --prefix="${{ env.XP_PREFIX }}" \
@@ -103,7 +104,7 @@ jobs:
           make -j"${JOBS}" all-gcc
           make install-gcc
 
-          # 4. MinGW-w64 CRT (32-bit MSVCRT para Prescott/XP)
+          # 4. MinGW-w64 CRT (32-bit MSVCRT para Prescott; preserva -D_WIN32_WINNT=0x0f00 interno do Makefile.am)
           mkdir -p "${WORK}/bld/crt" && cd "${WORK}/bld/crt"
           "${WORK}/src/mingw-w64/mingw-w64-crt/configure" \
             --build="${BUILD_TRIPLE}" \
@@ -112,7 +113,7 @@ jobs:
             --with-sysroot="${{ env.XP_PREFIX }}" \
             --with-default-msvcrt=msvcrt \
             --enable-lib32 --disable-lib64 \
-            CFLAGS="${XP_FLAGS}"
+            CFLAGS="${XP_ARCH_FLAGS}"
           make -j"${JOBS}"
           make install
 
@@ -134,9 +135,10 @@ jobs:
             CXXFLAGS_FOR_TARGET="${XP_FLAGS}"
           make install
 
-          # Recolher DLLs runtime da toolchain XP
-          mkdir -p "${{ env.XP_PREFIX }}/xp-runtime-dlls"
-          find "${{ env.XP_PREFIX }}" -type f -name '*.dll' -exec cp -f {} "${{ env.XP_PREFIX }}/xp-runtime-dlls/" \;
+          # Recolher DLLs runtime da toolchain XP para pasta separada antes de mover
+          find "${{ env.XP_PREFIX }}" -type f -name '*.dll' -exec cp -f {} "${WORK}/dlls/" \;
+          rm -rf "${{ env.XP_PREFIX }}/xp-runtime-dlls"
+          mv "${WORK}/dlls" "${{ env.XP_PREFIX }}/xp-runtime-dlls"
           rm -rf "${WORK}"
 
       - name: Install compiler & pkg-config shims for XP/Prescott
