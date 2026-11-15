@@ -141,25 +141,43 @@ jobs:
           mv "${WORK}/dlls" "${{ env.XP_PREFIX }}/xp-runtime-dlls"
           rm -rf "${WORK}"
 
-      - name: Install compiler & pkg-config shims for XP/Prescott
+      - name: Install compiler & linker shims for XP/Prescott
         run: |
           sudo mkdir -p "${{ env.XP_WRAPPERS }}/bin"
           sudo chown -R "$(id -u):$(id -g)" "${{ env.XP_WRAPPERS }}"
 
           cat > "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-gcc" <<'EOF'
           #!/usr/bin/env bash
+          args=()
+          for arg in "$@"; do
+            case "$arg" in
+              -Wl,-z,noexecstack|-Wl,-z,relro|-Wl,-z,now|-Wl,--disable-new-dtags)
+                continue
+                ;;
+            esac
+            args+=("$arg")
+          done
           exec ccache /opt/xp-mingw/bin/i686-w64-mingw32-gcc \
             -march=prescott -mtune=prescott \
             -D_WIN32_WINNT=0x0501 -DWINVER=0x0501 -DPSAPI_VERSION=1 \
-            "$@"
+            "${args[@]}"
           EOF
 
           cat > "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-g++" <<'EOF'
           #!/usr/bin/env bash
+          args=()
+          for arg in "$@"; do
+            case "$arg" in
+              -Wl,-z,noexecstack|-Wl,-z,relro|-Wl,-z,now|-Wl,--disable-new-dtags)
+                continue
+                ;;
+            esac
+            args+=("$arg")
+          done
           exec ccache /opt/xp-mingw/bin/i686-w64-mingw32-g++ \
             -march=prescott -mtune=prescott \
             -D_WIN32_WINNT=0x0501 -DWINVER=0x0501 -DPSAPI_VERSION=1 \
-            "$@"
+            "${args[@]}"
           EOF
 
           chmod +x "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-gcc" \
@@ -167,8 +185,9 @@ jobs:
           ln -sfn "${{ env.TARGET_TRIPLE }}-gcc" "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-cc"
           ln -sfn "${{ env.TARGET_TRIPLE }}-g++" "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-c++"
 
-          echo "${{ env.XP_WRAPPERS }}/bin" >> "$GITHUB_PATH"
+          # GITHUB_PATH faz prepend (LIFO): escrever XP_PREFIX primeiro para que XP_WRAPPERS fique à frente no PATH
           echo "${{ env.XP_PREFIX }}/bin" >> "$GITHUB_PATH"
+          echo "${{ env.XP_WRAPPERS }}/bin" >> "$GITHUB_PATH"
 
       - name: Checkout KOReader (with tags for describe.sh)
         uses: actions/checkout@v7
@@ -190,13 +209,21 @@ jobs:
           restore-keys: |
             ccache-winxp-prescott-
 
-      - name: Prepare WIN32_DIR runtime DLL shim and build KOReader
+      - name: Apply Win32 PE linker shims & build KOReader
         env:
           USE_NO_CCACHE: "1"
           PKG_CONFIG_LIBDIR: "${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}/lib/pkgconfig"
           PKG_CONFIG_SYSROOT_DIR: "${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}"
-          LDFLAGS: "-Wl,--enable-auto-import"
         run: |
+          test "$(command -v ${{ env.TARGET_TRIPLE }}-gcc)" = "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-gcc"
+
+          # Shim 1: Esvaziar flags ELF de RPATH (`--disable-new-dtags -rpath $ORIGIN ...`)
+          : > base/origin.ldflags
+
+          # Shim 2: Remover flag ELF `-Wl,-z,noexecstack` de base/Makefile.defs
+          sed -i 's/-Wl,-z,noexecstack//g' base/Makefile.defs
+
+          # Shim 3: Disponibilizar DLLs runtime XP em platform/win32/ para o `make`
           mkdir -p platform/win32
           cp -f "${{ env.XP_PREFIX }}/xp-runtime-dlls/"*.dll platform/win32/
 
