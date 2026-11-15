@@ -278,6 +278,8 @@ jobs:
       - name: Apply Win32 shims & build KOReader
         env:
           USE_NO_CCACHE: "1"
+          RC: "${{ env.XP_PREFIX }}/bin/${{ env.TARGET_TRIPLE }}-windres"
+          WINDRES: "${{ env.XP_PREFIX }}/bin/${{ env.TARGET_TRIPLE }}-windres"
         run: |
           test "$(command -v ${{ env.TARGET_TRIPLE }}-gcc)" = "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-gcc"
           test "$(command -v ${{ env.TARGET_TRIPLE }}-objcopy)" = "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-objcopy"
@@ -331,7 +333,7 @@ jobs:
           p.write_text(text)
           PY
 
-          # Shim 4: Gerar e validar meson_cross_toolchain.ini para Windows 32-bit (x86 / i686)
+          # Shim 4: Gerar e corrigir meson_cross_toolchain.ini para Windows 32-bit + windres + dlltool
           make TARGET=win32 CHOST="${{ env.TARGET_TRIPLE }}" \
             "base/build/${{ env.TARGET_TRIPLE }}/cmake/meson_cross_toolchain.ini"
 
@@ -340,16 +342,29 @@ jobs:
 
           ini = pathlib.Path("base/build/i686-w64-mingw32/cmake/meson_cross_toolchain.ini")
           text = ini.read_text()
-          print("=== meson_cross_toolchain.ini (gerado) ===")
-          print(text)
 
           text = re.sub(r"^system\s*=\s*['\"][^'\"]*['\"]", "system = 'windows'", text, flags=re.M)
-          text = re.sub(r"^cpu_family\s*=\s*['\"](?:|x86_64)['\"]", "cpu_family = 'x86'", text, flags=re.M)
-          text = re.sub(r"^cpu\s*=\s*['\"](?:|x86_64)['\"]", "cpu = 'i686'", text, flags=re.M)
-          text = re.sub(r"^endian\s*=\s*['\"]\s*['\"]", "endian = 'little'", text, flags=re.M)
-          text = re.sub(r"^windres\s*=\s*['\"]\s*['\"]", "windres = '/opt/xp-mingw/bin/i686-w64-mingw32-windres'", text, flags=re.M)
-          ini.write_text(text)
+          text = re.sub(r"^cpu_family\s*=\s*['\"][^'\"]*['\"]", "cpu_family = 'x86'", text, flags=re.M)
+          text = re.sub(r"^cpu\s*=\s*['\"][^'\"]*['\"]", "cpu = 'i686'", text, flags=re.M)
+          text = re.sub(r"^endian\s*=\s*['\"][^'\"]*['\"]", "endian = 'little'", text, flags=re.M)
 
+          if not re.search(r"^windres\s*=", text, flags=re.M):
+              text = re.sub(
+                  r"^(\[binaries\]\s*\n)",
+                  r"\1windres = '/opt/xp-mingw/bin/i686-w64-mingw32-windres'\n"
+                  r"dlltool = '/opt/xp-mingw/bin/i686-w64-mingw32-dlltool'\n",
+                  text,
+                  flags=re.M,
+              )
+          else:
+              text = re.sub(
+                  r"^windres\s*=.*$",
+                  "windres = '/opt/xp-mingw/bin/i686-w64-mingw32-windres'",
+                  text,
+                  flags=re.M,
+              )
+
+          ini.write_text(text)
           print("=== meson_cross_toolchain.ini (após shim) ===")
           print(text)
           PY
@@ -364,7 +379,7 @@ jobs:
             TARGET=win32 \
             CHOST="${{ env.TARGET_TRIPLE }}" \
             VERBOSE=1; then
-            echo "=== Build paralelo falhou; a re-executar em -j1 sem grupos colapsados ==="
+            echo "=== Build paralelo falhou; a re-executar em -j1 ==="
             set +e
             GITHUB_ACTIONS=false make -j1 \
               PARALLEL_JOBS=1 \
