@@ -140,7 +140,7 @@ jobs:
           mv "${WORK}/dlls" "${{ env.XP_PREFIX }}/xp-runtime-dlls"
           rm -rf "${WORK}"
 
-      - name: Install compiler & linker shims for XP/Prescott
+      - name: Install compiler, linker & objcopy shims for XP/Prescott
         run: |
           sudo mkdir -p "${{ env.XP_WRAPPERS }}/bin"
           sudo chown -R "$(id -u):$(id -g)" "${{ env.XP_WRAPPERS }}"
@@ -179,8 +179,75 @@ jobs:
             "${args[@]}"
           EOF
 
+          cat > "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-objcopy" <<'EOF'
+          #!/usr/bin/env python3
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
+
+          REAL = "/opt/xp-mingw/bin/i686-w64-mingw32-objcopy"
+          args = sys.argv[1:]
+
+          if (
+              len(args) >= 3
+              and any(f in args for f in ("--strip-unneeded", "--strip-debug", "--only-keep-debug"))
+              and not args[-2].startswith("-")
+              and not args[-1].startswith("-")
+          ):
+              src = pathlib.Path(args[-2])
+              dst = pathlib.Path(args[-1])
+              if not src.exists() and src.suffix.lower() == ".dll":
+                  staging = src.parent.parent
+                  candidates = []
+                  for sub in ("bin", "lib"):
+                      d = staging / sub
+                      if d.is_dir():
+                          candidates.extend(sorted(d.glob("*.dll")))
+
+                  def norm(name: str) -> str:
+                      s = name.lower()
+                      if s.endswith(".dll"):
+                          s = s[:-4]
+                      if s.startswith("lib"):
+                          s = s[3:]
+                      s = re.sub(r"[-._]?\d+$", "", s)
+                      return s
+
+                  target_name = src.name.lower()
+                  target_stem = norm(src.name)
+
+                  exact = [c for c in candidates if c.name.lower() == target_name]
+                  if exact:
+                      matched = exact[0]
+                  else:
+                      fuzzy = []
+                      for c in candidates:
+                          cs = norm(c.name)
+                          if cs == target_stem or (target_stem == "z" and cs.startswith("zlib")):
+                              fuzzy.append(c)
+                          elif len(target_stem) >= 2 and (target_stem in cs or cs in target_stem):
+                              fuzzy.append(c)
+                      if not fuzzy:
+                          print(f"[xp-objcopy-shim] ERRO: {src} não encontrado.", file=sys.stderr)
+                          print(f"[xp-objcopy-shim] DLLs em staging: {[str(c) for c in candidates]}", file=sys.stderr)
+                          sys.exit(1)
+                      matched = fuzzy[0]
+
+                  print(f"[xp-objcopy-shim] {src} -> {matched}", file=sys.stderr)
+                  dst.parent.mkdir(parents=True, exist_ok=True)
+                  subprocess.check_call([REAL] + args[:-2] + [str(matched), str(dst)])
+                  if matched.name != dst.name:
+                      subprocess.check_call([REAL] + args[:-2] + [str(matched), str(dst.parent / matched.name)])
+                  sys.exit(0)
+
+          os.execv(REAL, [REAL] + args)
+          EOF
+
           chmod +x "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-gcc" \
-                   "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-g++"
+                   "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-g++" \
+                   "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-objcopy"
           ln -sfn "${{ env.TARGET_TRIPLE }}-gcc" "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-cc"
           ln -sfn "${{ env.TARGET_TRIPLE }}-g++" "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-c++"
 
@@ -212,9 +279,9 @@ jobs:
         env:
           USE_NO_CCACHE: "1"
           PKG_CONFIG_LIBDIR: "${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}/lib/pkgconfig"
-          PKG_CONFIG_SYSROOT_DIR: "${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}"
         run: |
           test "$(command -v ${{ env.TARGET_TRIPLE }}-gcc)" = "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-gcc"
+          test "$(command -v ${{ env.TARGET_TRIPLE }}-objcopy)" = "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-objcopy"
 
           # Shim 1: Esvaziar flags ELF de RPATH (`--disable-new-dtags -rpath $ORIGIN ...`)
           : > base/origin.ldflags
@@ -228,12 +295,6 @@ jobs:
 
           p = pathlib.Path("base/cmake/CMakeLists.txt")
           text = p.read_text()
-
-          lines = text.splitlines()
-          print("--- base/cmake/CMakeLists.txt (linhas 160-230) ---")
-          for idx in range(159, min(230, len(lines))):
-              print(f"{idx+1:4d}: {lines[idx]}")
-          print("---------------------------------------------------")
 
           p1 = re.compile(
               r'message\s*\(\s*(?:FATAL_ERROR|SEND_ERROR)\s+"could not determine libc type"[^)]*\)',
