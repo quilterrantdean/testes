@@ -335,10 +335,18 @@ jobs:
 
           # Invocar make directamente contornando `is_system Windows` do kodev
           # e forçando CHOST=i686-w64-mingw32 (o default em Makefile.defs é x86_64)
-          make -j"$(nproc)" \
+          if ! make -j"$(nproc)" \
             TARGET=win32 \
             CHOST="${{ env.TARGET_TRIPLE }}" \
-            VERBOSE=1
+            VERBOSE=1; then
+            echo "=== Build paralelo falhou; a re-executar em -j1 para isolar o erro exacto ==="
+            make -j1 \
+              PARALLEL_JOBS=1 \
+              NINJAFLAGS="-v -j1" \
+              TARGET=win32 \
+              CHOST="${{ env.TARGET_TRIPLE }}" \
+              VERBOSE=1
+          fi
 
       - name: Package portable bundle (dereferencing symlinks) & add launcher
         run: |
