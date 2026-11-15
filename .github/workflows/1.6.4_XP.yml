@@ -1,0 +1,274 @@
+name: Build KOReader Emulator (Windows XP 32-bit / P4 HT Prescott)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+
+concurrency:
+  group: winxp-prescott-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: stdbuf --error=L --output=L bash --noprofile --norc -eo pipefail {0}
+
+jobs:
+  build-winxp-prescott:
+    runs-on: ubuntu-24.04
+    env:
+      XP_PREFIX: /opt/xp-mingw
+      XP_WRAPPERS: /opt/xp-wrappers
+      TARGET_TRIPLE: i686-w64-mingw32
+      BINUTILS_VER: 2.43.1
+      GCC_VER: 14.2.0
+      MINGW_VER: v12.0.0
+
+    steps:
+      - name: Install Linux host build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake build-essential ca-certificates cmake \
+            gcc-multilib g++-multilib gettext git libtool libtool-bin \
+            meson nasm ninja-build patch pkg-config python3 unzip wget \
+            ccache zip bzip2 xz-utils texinfo flex bison m4 curl
+
+      - name: Restore cached Windows XP Prescott MinGW-w64 toolchain
+        id: cache-tc
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.XP_PREFIX }}
+          key: xp-tc-binutils${{ env.BINUTILS_VER }}-gcc${{ env.GCC_VER }}-mingw${{ env.MINGW_VER }}-prescott-xp-v1
+
+      - name: Build Windows XP MSVCRT P4-Prescott cross-toolchain (on cache miss)
+        if: steps.cache-tc.outputs.cache-hit != 'true'
+        run: |
+          sudo mkdir -p "${{ env.XP_PREFIX }}"
+          sudo chown -R "$(id -u):$(id -g)" "${{ env.XP_PREFIX }}"
+
+          WORK=/tmp/xp-tc-build
+          mkdir -p "${WORK}/src" "${WORK}/bld"
+          cd "${WORK}/src"
+
+          curl -fsSL "https://ftp.gnu.org/gnu/binutils/binutils-${{ env.BINUTILS_VER }}.tar.xz" | tar -xJ
+          curl -fsSL "https://ftp.gnu.org/gnu/gcc/gcc-${{ env.GCC_VER }}/gcc-${{ env.GCC_VER }}.tar.xz" | tar -xJ
+          git clone --depth 1 --branch "${{ env.MINGW_VER }}" https://git.code.sf.net/p/mingw-w64/mingw-w64 mingw-w64
+
+          cd "${WORK}/src/gcc-${{ env.GCC_VER }}"
+          ./contrib/download_prerequisites
+
+          BUILD_TRIPLE="$(gcc -dumpmachine)"
+          JOBS="$(nproc)"
+          XP_FLAGS="-O2 -march=prescott -mtune=prescott -D_WIN32_WINNT=0x0501 -DWINVER=0x0501 -DPSAPI_VERSION=1"
+
+          mkdir -p "${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}"
+          ln -sfn "${{ env.TARGET_TRIPLE }}" "${{ env.XP_PREFIX }}/mingw"
+          export PATH="${{ env.XP_PREFIX }}/bin:${PATH}"
+
+          # 1. Binutils
+          mkdir -p "${WORK}/bld/binutils" && cd "${WORK}/bld/binutils"
+          "${WORK}/src/binutils-${{ env.BINUTILS_VER }}/configure" \
+            --prefix="${{ env.XP_PREFIX }}" \
+            --with-sysroot="${{ env.XP_PREFIX }}" \
+            --target="${{ env.TARGET_TRIPLE }}" \
+            --disable-multilib --disable-nls --disable-gdb --disable-gprofng --disable-werror
+          make -j"${JOBS}"
+          make install
+
+          # 2. MinGW-w64 headers (MSVCRT + Windows XP 0x0501)
+          mkdir -p "${WORK}/bld/headers" && cd "${WORK}/bld/headers"
+          "${WORK}/src/mingw-w64/mingw-w64-headers/configure" \
+            --build="${BUILD_TRIPLE}" \
+            --host="${{ env.TARGET_TRIPLE }}" \
+            --prefix="${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}" \
+            --with-default-win32-winnt=0x0501 \
+            --with-default-msvcrt=msvcrt
+          make install
+
+          # 3. GCC Stage 1 (C/C++ compiler + POSIX threads + DWARF2 + Prescott)
+          mkdir -p "${WORK}/bld/gcc" && cd "${WORK}/bld/gcc"
+          "${WORK}/src/gcc-${{ env.GCC_VER }}/configure" \
+            --prefix="${{ env.XP_PREFIX }}" \
+            --with-sysroot="${{ env.XP_PREFIX }}" \
+            --target="${{ env.TARGET_TRIPLE }}" \
+            --enable-languages=c,c++ \
+            --enable-threads=posix \
+            --disable-sjlj-exceptions \
+            --with-dwarf2 \
+            --with-arch=prescott \
+            --with-tune=prescott \
+            --disable-multilib --disable-nls \
+            --enable-shared --enable-static
+          make -j"${JOBS}" all-gcc
+          make install-gcc
+
+          # 4. MinGW-w64 CRT (32-bit MSVCRT para Prescott/XP)
+          mkdir -p "${WORK}/bld/crt" && cd "${WORK}/bld/crt"
+          "${WORK}/src/mingw-w64/mingw-w64-crt/configure" \
+            --build="${BUILD_TRIPLE}" \
+            --host="${{ env.TARGET_TRIPLE }}" \
+            --prefix="${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}" \
+            --with-sysroot="${{ env.XP_PREFIX }}" \
+            --with-default-msvcrt=msvcrt \
+            --enable-lib32 --disable-lib64 \
+            CFLAGS="${XP_FLAGS}"
+          make -j"${JOBS}"
+          make install
+
+          # 5. Winpthreads compilada com _WIN32_WINNT=0x0501
+          mkdir -p "${WORK}/bld/winpthreads" && cd "${WORK}/bld/winpthreads"
+          "${WORK}/src/mingw-w64/mingw-w64-libraries/winpthreads/configure" \
+            --build="${BUILD_TRIPLE}" \
+            --host="${{ env.TARGET_TRIPLE }}" \
+            --prefix="${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}" \
+            --enable-shared --enable-static \
+            CFLAGS="${XP_FLAGS}"
+          make -j"${JOBS}"
+          make install
+
+          # 6. GCC Stage 2 (libgcc + libstdc++ compiladas para Prescott/XP)
+          cd "${WORK}/bld/gcc"
+          make -j"${JOBS}" \
+            CFLAGS_FOR_TARGET="${XP_FLAGS}" \
+            CXXFLAGS_FOR_TARGET="${XP_FLAGS}"
+          make install
+
+          # Recolher DLLs runtime da toolchain XP
+          mkdir -p "${{ env.XP_PREFIX }}/xp-runtime-dlls"
+          find "${{ env.XP_PREFIX }}" -type f -name '*.dll' -exec cp -f {} "${{ env.XP_PREFIX }}/xp-runtime-dlls/" \;
+          rm -rf "${WORK}"
+
+      - name: Install compiler & pkg-config shims for XP/Prescott
+        run: |
+          sudo mkdir -p "${{ env.XP_WRAPPERS }}/bin"
+          sudo chown -R "$(id -u):$(id -g)" "${{ env.XP_WRAPPERS }}"
+
+          cat > "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-gcc" <<'EOF'
+          #!/usr/bin/env bash
+          exec ccache /opt/xp-mingw/bin/i686-w64-mingw32-gcc \
+            -march=prescott -mtune=prescott \
+            -D_WIN32_WINNT=0x0501 -DWINVER=0x0501 -DPSAPI_VERSION=1 \
+            "$@"
+          EOF
+
+          cat > "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-g++" <<'EOF'
+          #!/usr/bin/env bash
+          exec ccache /opt/xp-mingw/bin/i686-w64-mingw32-g++ \
+            -march=prescott -mtune=prescott \
+            -D_WIN32_WINNT=0x0501 -DWINVER=0x0501 -DPSAPI_VERSION=1 \
+            "$@"
+          EOF
+
+          chmod +x "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-gcc" \
+                   "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-g++"
+          ln -sfn "${{ env.TARGET_TRIPLE }}-gcc" "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-cc"
+          ln -sfn "${{ env.TARGET_TRIPLE }}-g++" "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-c++"
+
+          echo "${{ env.XP_WRAPPERS }}/bin" >> "$GITHUB_PATH"
+          echo "${{ env.XP_PREFIX }}/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout KOReader (with tags for describe.sh)
+        uses: actions/checkout@v7
+        with:
+          repository: koreader/koreader
+          fetch-depth: 0
+
+      - name: Fetch third-party submodules
+        env:
+          CI: "true"
+        run: |
+          make fetchthirdparty
+
+      - name: Restore ccache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          key: ccache-winxp-prescott-${{ github.sha }}
+          restore-keys: |
+            ccache-winxp-prescott-
+
+      - name: Prepare WIN32_DIR runtime DLL shim and build KOReader
+        env:
+          USE_NO_CCACHE: "1"
+          PKG_CONFIG_LIBDIR: "${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}/lib/pkgconfig"
+          PKG_CONFIG_SYSROOT_DIR: "${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}"
+          LDFLAGS: "-Wl,--enable-auto-import"
+        run: |
+          mkdir -p platform/win32
+          cp -f "${{ env.XP_PREFIX }}/xp-runtime-dlls/"*.dll platform/win32/
+
+          # Invocar make directamente contornando `is_system Windows` do kodev
+          # e forçando CHOST=i686-w64-mingw32 (o default em Makefile.defs é x86_64)
+          make -j"$(nproc)" \
+            TARGET=win32 \
+            CHOST="${{ env.TARGET_TRIPLE }}" \
+            VERBOSE=1
+
+      - name: Package portable bundle (dereferencing symlinks) & add launcher
+        run: |
+          OUT_DIR="$(find . -maxdepth 1 -type d -name 'koreader-win32-*' | head -n1)"
+          test -n "${OUT_DIR}"
+
+          STAGE_DIR="dist/koreader-winxp-prescott"
+          mkdir -p dist
+          cp -rL "${OUT_DIR}/koreader" "${STAGE_DIR}"
+          cp -f "${{ env.XP_PREFIX }}/xp-runtime-dlls/"*.dll "${STAGE_DIR}/"
+
+          cat > "${STAGE_DIR}/koreader.bat" <<'EOF'
+          @echo off
+          setlocal
+          if not defined HOME set "HOME=%USERPROFILE%"
+          cd /d "%~dp0"
+          luajit.exe reader.lua %*
+          EOF
+
+          (cd dist && zip -r9 ../koreader-winxp-i686-prescott.zip koreader-winxp-prescott)
+
+      - name: Verify PE32 i386 format and Windows XP import compatibility
+        run: |
+          python3 - <<'PY'
+          import pathlib, subprocess, sys
+
+          forbidden = [
+              b"ucrtbase.dll",
+              b"api-ms-win-crt-",
+              b"GetTickCount64",
+              b"InitializeCriticalSectionEx",
+              b"GetDynamicTimeZoneInformation",
+              b"InitOnceExecuteOnce",
+              b"InitializeSRWLock",
+              b"TryAcquireSRWLockExclusive",
+              b"CancelIoEx",
+              b"freopen_s",
+              b"inet_ntop",
+              b"inet_pton",
+          ]
+
+          root = pathlib.Path("dist/koreader-winxp-prescott")
+          bins = list(root.rglob("*.exe")) + list(root.rglob("*.dll"))
+          if not bins:
+              sys.exit("ERRO: nenhum .exe ou .dll encontrado no pacote final.")
+
+          failed = False
+          for b in bins:
+              out = subprocess.check_output(["i686-w64-mingw32-objdump", "-p", str(b)])
+              if b"file format pei-i386" not in out:
+                  print(f"[FAIL] {b}: não é PE32 i386!")
+                  failed = True
+              for sym in forbidden:
+                  if sym in out:
+                      print(f"[WARN/FAIL] {b}: importa símbolo/DLL incompatível com WinXP: {sym.decode()}")
+                      failed = True
+
+          if failed:
+              sys.exit(1)
+          print(f"OK: {len(bins)} binários PE32 i386 validados sem imports pós-XP.")
+          PY
+
+      - name: Upload Windows XP Prescott build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: koreader-winxp-i686-prescott
+          path: koreader-winxp-i686-prescott.zip
+          if-no-files-found: error
