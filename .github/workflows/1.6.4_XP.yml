@@ -222,7 +222,7 @@ jobs:
           # Shim 2: Remover flag ELF `-Wl,-z,noexecstack` de base/Makefile.defs
           sed -i 's/-Wl,-z,noexecstack//g' base/Makefile.defs
 
-          # Shim 3: Ignorar verificação de <features.h> (glibc/musl) em Win32
+          # Shim 3: Ignorar verificação de <features.h> (glibc/musl) e erro `unsupported libc type:` em Win32
           python3 - <<'PY'
           import pathlib, re, sys
 
@@ -230,19 +230,26 @@ jobs:
           text = p.read_text()
 
           lines = text.splitlines()
-          print("--- base/cmake/CMakeLists.txt (linhas 160-220) ---")
-          for idx in range(159, min(220, len(lines))):
+          print("--- base/cmake/CMakeLists.txt (linhas 160-230) ---")
+          for idx in range(159, min(230, len(lines))):
               print(f"{idx+1:4d}: {lines[idx]}")
           print("---------------------------------------------------")
 
-          pattern = re.compile(
-              r'message\s*\(\s*(?:FATAL_ERROR|SEND_ERROR)\s+"could not determine libc type"\s*\)',
+          p1 = re.compile(
+              r'message\s*\(\s*(?:FATAL_ERROR|SEND_ERROR)\s+"could not determine libc type"[^)]*\)',
               re.MULTILINE,
           )
-          if not pattern.search(text):
-              sys.exit("ERRO: padrão 'could not determine libc type' não encontrado em base/cmake/CMakeLists.txt")
+          p2 = re.compile(
+              r'message\s*\(\s*(?:FATAL_ERROR|SEND_ERROR)\s+"unsupported libc type:[^)]*\)',
+              re.MULTILINE,
+          )
 
-          patched = pattern.sub(
+          if not p1.search(text):
+              sys.exit("ERRO: padrão 'could not determine libc type' não encontrado em base/cmake/CMakeLists.txt")
+          if not p2.search(text):
+              sys.exit("ERRO: padrão 'unsupported libc type:' não encontrado em base/cmake/CMakeLists.txt")
+
+          text = p1.sub(
               'if(WIN32)\n'
               '    message(STATUS "Win32 target: skipping features.h libc check (MSVCRT)")\n'
               '  else()\n'
@@ -250,7 +257,15 @@ jobs:
               '  endif()',
               text,
           )
-          p.write_text(patched)
+          text = p2.sub(
+              'if(WIN32)\n'
+              '    message(STATUS "Win32 target: using MSVCRT")\n'
+              '  else()\n'
+              '    \\g<0>\n'
+              '  endif()',
+              text,
+          )
+          p.write_text(text)
           PY
 
           # Shim 4: Disponibilizar DLLs runtime XP em platform/win32/ para o `make`
