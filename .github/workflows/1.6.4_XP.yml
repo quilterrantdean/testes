@@ -3,7 +3,6 @@ name: Build KOReader Emulator (Windows XP 32-bit / P4 HT Prescott)
 on:
   workflow_dispatch:
   push:
-    branches: [ master ]
 
 concurrency:
   group: winxp-prescott-${{ github.ref }}
@@ -209,7 +208,7 @@ jobs:
           restore-keys: |
             ccache-winxp-prescott-
 
-      - name: Apply Win32 PE linker shims & build KOReader
+      - name: Apply Win32 shims & build KOReader
         env:
           USE_NO_CCACHE: "1"
           PKG_CONFIG_LIBDIR: "${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}/lib/pkgconfig"
@@ -223,7 +222,38 @@ jobs:
           # Shim 2: Remover flag ELF `-Wl,-z,noexecstack` de base/Makefile.defs
           sed -i 's/-Wl,-z,noexecstack//g' base/Makefile.defs
 
-          # Shim 3: Disponibilizar DLLs runtime XP em platform/win32/ para o `make`
+          # Shim 3: Ignorar verificação de <features.h> (glibc/musl) em Win32
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          p = pathlib.Path("base/cmake/CMakeLists.txt")
+          text = p.read_text()
+
+          lines = text.splitlines()
+          print("--- base/cmake/CMakeLists.txt (linhas 160-220) ---")
+          for idx in range(159, min(220, len(lines))):
+              print(f"{idx+1:4d}: {lines[idx]}")
+          print("---------------------------------------------------")
+
+          pattern = re.compile(
+              r'message\s*\(\s*(?:FATAL_ERROR|SEND_ERROR)\s+"could not determine libc type"\s*\)',
+              re.MULTILINE,
+          )
+          if not pattern.search(text):
+              sys.exit("ERRO: padrão 'could not determine libc type' não encontrado em base/cmake/CMakeLists.txt")
+
+          patched = pattern.sub(
+              'if(WIN32)\n'
+              '    message(STATUS "Win32 target: skipping features.h libc check (MSVCRT)")\n'
+              '  else()\n'
+              '    \\g<0>\n'
+              '  endif()',
+              text,
+          )
+          p.write_text(patched)
+          PY
+
+          # Shim 4: Disponibilizar DLLs runtime XP em platform/win32/ para o `make`
           mkdir -p platform/win32
           cp -f "${{ env.XP_PREFIX }}/xp-runtime-dlls/"*.dll platform/win32/
 
