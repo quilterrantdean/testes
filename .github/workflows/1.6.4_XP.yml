@@ -278,10 +278,12 @@ jobs:
       - name: Apply Win32 shims & build KOReader
         env:
           USE_NO_CCACHE: "1"
-          PKG_CONFIG_LIBDIR: "${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}/lib/pkgconfig"
         run: |
           test "$(command -v ${{ env.TARGET_TRIPLE }}-gcc)" = "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-gcc"
           test "$(command -v ${{ env.TARGET_TRIPLE }}-objcopy)" = "${{ env.XP_WRAPPERS }}/bin/${{ env.TARGET_TRIPLE }}-objcopy"
+
+          STAGING_DIR="${PWD}/base/build/${{ env.TARGET_TRIPLE }}/staging"
+          export PKG_CONFIG_LIBDIR="${STAGING_DIR}/lib/pkgconfig:${STAGING_DIR}/share/pkgconfig:${{ env.XP_PREFIX }}/${{ env.TARGET_TRIPLE }}/lib/pkgconfig"
 
           # Shim 1: Esvaziar flags ELF de RPATH (`--disable-new-dtags -rpath $ORIGIN ...`)
           : > base/origin.ldflags
@@ -329,7 +331,30 @@ jobs:
           p.write_text(text)
           PY
 
-          # Shim 4: Disponibilizar DLLs runtime XP em platform/win32/ para o `make`
+          # Shim 4: Gerar e validar meson_cross_toolchain.ini para Windows 32-bit (x86 / i686)
+          make TARGET=win32 CHOST="${{ env.TARGET_TRIPLE }}" \
+            "base/build/${{ env.TARGET_TRIPLE }}/cmake/meson_cross_toolchain.ini"
+
+          python3 - <<'PY'
+          import pathlib, re
+
+          ini = pathlib.Path("base/build/i686-w64-mingw32/cmake/meson_cross_toolchain.ini")
+          text = ini.read_text()
+          print("=== meson_cross_toolchain.ini (gerado) ===")
+          print(text)
+
+          text = re.sub(r"^system\s*=\s*['\"][^'\"]*['\"]", "system = 'windows'", text, flags=re.M)
+          text = re.sub(r"^cpu_family\s*=\s*['\"](?:|x86_64)['\"]", "cpu_family = 'x86'", text, flags=re.M)
+          text = re.sub(r"^cpu\s*=\s*['\"](?:|x86_64)['\"]", "cpu = 'i686'", text, flags=re.M)
+          text = re.sub(r"^endian\s*=\s*['\"]\s*['\"]", "endian = 'little'", text, flags=re.M)
+          text = re.sub(r"^windres\s*=\s*['\"]\s*['\"]", "windres = '/opt/xp-mingw/bin/i686-w64-mingw32-windres'", text, flags=re.M)
+          ini.write_text(text)
+
+          print("=== meson_cross_toolchain.ini (após shim) ===")
+          print(text)
+          PY
+
+          # Shim 5: Disponibilizar DLLs runtime XP em platform/win32/ para o `make`
           mkdir -p platform/win32
           cp -f "${{ env.XP_PREFIX }}/xp-runtime-dlls/"*.dll platform/win32/
 
@@ -339,13 +364,20 @@ jobs:
             TARGET=win32 \
             CHOST="${{ env.TARGET_TRIPLE }}" \
             VERBOSE=1; then
-            echo "=== Build paralelo falhou; a re-executar em -j1 para isolar o erro exacto ==="
-            make -j1 \
+            echo "=== Build paralelo falhou; a re-executar em -j1 sem grupos colapsados ==="
+            set +e
+            GITHUB_ACTIONS=false make -j1 \
               PARALLEL_JOBS=1 \
               NINJAFLAGS="-v -j1" \
               TARGET=win32 \
               CHOST="${{ env.TARGET_TRIPLE }}" \
               VERBOSE=1
+            RC_CODE=$?
+            if [ "${RC_CODE}" -ne 0 ]; then
+              echo "=== meson-log.txt (últimas 100 linhas) ==="
+              find "base/build/${{ env.TARGET_TRIPLE }}" -name 'meson-log.txt' -exec sh -c 'echo "--- $1 ---"; tail -n 100 "$1"' _ {} \; || true
+              exit "${RC_CODE}"
+            fi
           fi
 
       - name: Package portable bundle (dereferencing symlinks) & add launcher
