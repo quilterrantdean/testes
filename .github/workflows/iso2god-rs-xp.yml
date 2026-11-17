@@ -1,0 +1,182 @@
+name: Release Windows XP x86 (Pentium 4 Prescott)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag da Release a publicar no GitHub"
+        required: true
+        default: "v1.8.1-winxp-prescott"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-winxp-prescott:
+    name: Build i686 Windows XP (Prescott)
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout do código-fonte
+        uses: actions/checkout@v4
+
+      - name: Instalar Rust Nightly + rust-src
+        shell: pwsh
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src
+          rustup default nightly
+
+      - name: Descarregar VC-LTL5 e YY-Thunks
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $depsRoot = Join-Path $env:RUNNER_TEMP "xp-deps"
+          New-Item -ItemType Directory -Force -Path $depsRoot | Out-Null
+
+          $headers = @{
+            "User-Agent"    = "GitHub-Actions-WinXP-Builder"
+            "Authorization" = "Bearer $env:GH_TOKEN"
+          }
+
+          # 1. YY-Thunks v1.2.3 (Objs para MSVC link.exe)
+          $yyRel = Invoke-RestMethod -Uri "https://api.github.com/repos/Chuyu-Team/YY-Thunks/releases/tags/v1.2.3" -Headers $headers
+          $yyAsset = $yyRel.assets | Where-Object { $_.name -match "Objs\.zip$" } | Select-Object -First 1
+          if (-not $yyAsset) { throw "Asset YY-Thunks Objs não encontrado." }
+
+          $yyZip = Join-Path $depsRoot $yyAsset.name
+          $yyDir = Join-Path $depsRoot "yy-thunks"
+          Invoke-WebRequest -Uri $yyAsset.browser_download_url -OutFile $yyZip
+          7z x $yyZip "-o$yyDir" -y | Out-Null
+
+          # 2. VC-LTL5 v5.3.1 (CRT ligado ao msvcrt.dll do XP)
+          $vcRel = Invoke-RestMethod -Uri "https://api.github.com/repos/Chuyu-Team/VC-LTL5/releases/tags/v5.3.1" -Headers $headers
+          $vcAsset = $vcRel.assets | Where-Object { $_.name -match "Binary\.(7z|zip)$" } | Select-Object -First 1
+          if (-not $vcAsset) { throw "Asset VC-LTL5 Binary não encontrado." }
+
+          $vcArchive = Join-Path $depsRoot $vcAsset.name
+          $vcDir = Join-Path $depsRoot "vc-ltl"
+          Invoke-WebRequest -Uri $vcAsset.browser_download_url -OutFile $vcArchive
+          7z x $vcArchive "-o$vcDir" -y | Out-Null
+
+          # Localizar e validar os caminhos exactos (sem espaços)
+          $yyObj = Get-ChildItem -Path $yyDir -Recurse -Filter "YY_Thunks_for_WinXP.obj" |
+            Where-Object { $_.FullName -match "\\x86\\" } |
+            Select-Object -First 1 -ExpandProperty FullName
+
+          $vcWin32Lib = Get-ChildItem -Path $vcDir -Recurse -Directory -Filter "Win32" |
+            Where-Object { $_.FullName -match "\\TargetPlatform\\5\.1\.2600\.0\\lib\\Win32$" } |
+            Select-Object -First 1 -ExpandProperty FullName
+
+          if (-not $yyObj -or -not (Test-Path $yyObj)) { throw "YY_Thunks_for_WinXP.obj (x86) não encontrado." }
+          if (-not $vcWin32Lib -or -not (Test-Path $vcWin32Lib)) { throw "VC-LTL5 TargetPlatform\5.1.2600.0\lib\Win32 não encontrado." }
+
+          Write-Host "YY_THUNK_OBJ=$yyObj"
+          Write-Host "VC_LTL_WIN32_LIB=$vcWin32Lib"
+          "YY_THUNK_OBJ=$yyObj" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VC_LTL_WIN32_LIB=$vcWin32Lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Compilar iso2god (Windows XP x86 + Pentium 4 Prescott)
+        shell: pwsh
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
+          CARGO_PROFILE_RELEASE_LTO: "fat"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CARGO_PROFILE_RELEASE_PANIC: "abort"
+          CARGO_PROFILE_RELEASE_STRIP: "symbols"
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Usar CARGO_TARGET_<TRIPLE>_RUSTFLAGS para não afectar proc-macros (host x64)
+          $targetFlags = @(
+            "-C", "target-cpu=prescott",
+            "-C", "target-feature=+crt-static",
+            "-L", "native=$($env:VC_LTL_WIN32_LIB)",
+            "-C", "link-arg=/SUBSYSTEM:CONSOLE,5.01",
+            "-C", "link-arg=oldnames.lib",
+            "-C", "link-arg=$($env:YY_THUNK_OBJ)"
+          ) -join " "
+
+          $env:CARGO_TARGET_I686_WIN7_WINDOWS_MSVC_RUSTFLAGS = $targetFlags
+
+          cargo build `
+            --locked `
+            --release `
+            --bin iso2god `
+            --target i686-win7-windows-msvc `
+            -Z build-std=std,panic_abort
+
+      - name: Ajustar cabeçalho PE (5.01), validar importações e empacotar
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $builtExe = "target\i686-win7-windows-msvc\release\iso2god.exe"
+          if (-not (Test-Path $builtExe)) { throw "Executável não encontrado: $builtExe" }
+
+          New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+          $outExe = "dist\iso2god-i686-windows-xp-prescott.exe"
+          Copy-Item -Path $builtExe -Destination $outExe -Force
+
+          # Inicializar ferramentas MSVC (editbin / dumpbin)
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Push-Location
+          & "$vsPath\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64
+          Pop-Location
+
+          # Garantir versão de sistema operativo e subsistema 5.01 (Windows XP x86)
+          editbin.exe /NOLOGO /SUBSYSTEM:CONSOLE,5.01 /OSVERSION:5.01 $outExe
+
+          Write-Host "=== Cabeçalhos PE ==="
+          $headersOut = dumpbin.exe /NOLOGO /HEADERS $outExe
+          $headersOut | Select-String -Pattern "machine|operating system version|subsystem version" | ForEach-Object { Write-Host $_ }
+
+          Write-Host "=== Tabela de importações (DLLs) ==="
+          $importsOut = dumpbin.exe /NOLOGO /IMPORTS $outExe
+          $importsOut | Where-Object { $_ -match "\.dll" } | ForEach-Object { Write-Host $_ }
+
+          $forbidden = $importsOut | Select-String -Pattern "api-ms-win-|VCRUNTIME140|ucrtbase\.dll|bcryptprimitives\.dll" -CaseSensitive:$false
+          if ($forbidden) {
+            Write-Host $importsOut
+            throw "Detetadas DLLs incompatíveis com Windows XP: $forbidden"
+          }
+
+          $hash = (Get-FileHash -Path $outExe -Algorithm SHA256).Hash.ToLower()
+          "$hash  iso2god-i686-windows-xp-prescott.exe" | Out-File -FilePath "$outExe.sha256" -Encoding ascii
+
+      - name: Guardar artefacto do workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: iso2god-i686-windows-xp-prescott
+          path: |
+            dist/iso2god-i686-windows-xp-prescott.exe
+            dist/iso2god-i686-windows-xp-prescott.exe.sha256
+
+      - name: Definir tag da Release
+        id: meta
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}"
+          } else {
+            $tag = "${{ inputs.release_tag }}"
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Publicar Release no GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "iso2god-rs Windows XP x86 (Pentium 4 Prescott) - ${{ steps.meta.outputs.tag }}"
+          files: |
+            dist/iso2god-i686-windows-xp-prescott.exe
+            dist/iso2god-i686-windows-xp-prescott.exe.sha256
+          body: |
+            Compilação não oficial do `iliazeus/iso2god-rs` optimizada para:
+            - **Sistema Operativo:** Windows XP 32 bits (`i686-win7-windows-msvc` + `VC-LTL5` + `YY-Thunks`, subsistema `5.01`)
+            - **CPU:** Intel Pentium 4 HT Prescott (`-C target-cpu=prescott`: MMX, SSE, SSE2, SSE3; sem SSSE3/SSE4/AVX)
+            - **Optimizações:** `opt-level=3`, `lto="fat"`, `codegen-units=1`, `panic="abort"`, `strip="symbols"`
