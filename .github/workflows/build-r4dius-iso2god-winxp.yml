@@ -28,38 +28,109 @@ jobs:
           }
           git clone --depth 1 --branch $env:GIT_REF https://github.com/r4dius/Iso2God.git r4dius-src
 
-      - name: Ajustar Iso2God.csproj para Windows XP (.NET 4.0 + x86)
+      - name: Adaptar projecto, App.config e TaskEx para Windows XP (.NET 4.0)
         working-directory: r4dius-src
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          # 1. Substituir Task.Run (API .NET 4.5+) por TaskEx.Run (Microsoft.Bcl.Async)
+          Get-ChildItem -Recurse -Filter "*.cs" | ForEach-Object {
+            $content = Get-Content -Path $_.FullName -Raw -Encoding UTF8
+            if ($content -match "\bTask\.Run\b") {
+              Write-Host "A adaptar Task.Run -> TaskEx.Run em $($_.FullName)"
+              $updated = [regex]::Replace($content, "\bTask\.Run\b", "TaskEx.Run")
+              [System.IO.File]::WriteAllText($_.FullName, $updated, [System.Text.UTF8Encoding]::new($false))
+            }
+          }
+
+          # 2. Criar ou actualizar App.config com redirects para Microsoft.Bcl / Net.Http em net40
+          $appConfigPath = "App.config"
+          if (Test-Path $appConfigPath) {
+            [xml]$cfg = Get-Content -Path $appConfigPath -Raw -Encoding UTF8
+          } else {
+            [xml]$cfg = '<?xml version="1.0" encoding="utf-8"?><configuration></configuration>'
+          }
+
+          $configNode = $cfg.DocumentElement
+
+          $startup = $configNode.SelectSingleNode("startup")
+          if (-not $startup) {
+            $startup = $cfg.CreateElement("startup")
+            $configNode.AppendChild($startup) | Out-Null
+          }
+          $supported = $startup.SelectSingleNode("supportedRuntime")
+          if (-not $supported) {
+            $supported = $cfg.CreateElement("supportedRuntime")
+            $startup.AppendChild($supported) | Out-Null
+          }
+          $supported.SetAttribute("version", "v4.0")
+          $supported.SetAttribute("sku", ".NETFramework,Version=v4.0")
+
+          $runtime = $configNode.SelectSingleNode("runtime")
+          if (-not $runtime) {
+            $runtime = $cfg.CreateElement("runtime")
+            $configNode.AppendChild($runtime) | Out-Null
+          }
+          $asmNs = "urn:schemas-microsoft-com:asm.v1"
+          $nsmgr = New-Object System.Xml.XmlNamespaceManager($cfg.NameTable)
+          $nsmgr.AddNamespace("ab", $asmNs)
+          $binding = $runtime.SelectSingleNode("ab:assemblyBinding", $nsmgr)
+          if (-not $binding) {
+            $binding = $cfg.CreateElement("assemblyBinding", $asmNs)
+            $runtime.AppendChild($binding) | Out-Null
+          }
+
+          $redirects = @(
+            @{ name = "System.Net.Http";        old = "0.0.0.0-2.2.29.0"; new = "2.2.29.0" },
+            @{ name = "System.IO";              old = "0.0.0.0-2.6.10.0"; new = "2.6.10.0" },
+            @{ name = "System.Runtime";         old = "0.0.0.0-2.6.10.0"; new = "2.6.10.0" },
+            @{ name = "System.Threading.Tasks"; old = "0.0.0.0-2.6.10.0"; new = "2.6.10.0" }
+          )
+
+          foreach ($r in $redirects) {
+            $existing = $binding.SelectSingleNode("ab:dependentAssembly[ab:assemblyIdentity[@name='$($r.name)']]", $nsmgr)
+            if ($existing) { $binding.RemoveChild($existing) | Out-Null }
+
+            $dep = $cfg.CreateElement("dependentAssembly", $asmNs)
+            $id = $cfg.CreateElement("assemblyIdentity", $asmNs)
+            $id.SetAttribute("name", $r.name)
+            $id.SetAttribute("publicKeyToken", "b03f5f7f11d50a3a")
+            $id.SetAttribute("culture", "neutral")
+
+            $br = $cfg.CreateElement("bindingRedirect", $asmNs)
+            $br.SetAttribute("oldVersion", $r.old)
+            $br.SetAttribute("newVersion", $r.new)
+
+            $dep.AppendChild($id) | Out-Null
+            $dep.AppendChild($br) | Out-Null
+            $binding.AppendChild($dep) | Out-Null
+          }
+
+          $cfg.Save((Join-Path (Get-Location) $appConfigPath))
+
+          # 3. Ajustar Iso2God.csproj
           $csprojPath = "Iso2God.csproj"
           if (-not (Test-Path $csprojPath)) { throw "Iso2God.csproj não encontrado." }
 
           [xml]$xml = Get-Content -Path $csprojPath -Raw -Encoding UTF8
           $ns = $xml.Project.NamespaceURI
 
-          # Alterar TargetFramework para net40 (última versão suportada no Windows XP SP3)
           foreach ($pg in $xml.Project.PropertyGroup) {
-            if ($pg.TargetFramework) {
-              $pg.TargetFramework = "net40"
-            }
-            if ($pg.TargetFrameworkVersion) {
-              $pg.TargetFrameworkVersion = "v4.0"
-            }
+            if ($pg.TargetFramework) { $pg.TargetFramework = "net40" }
+            if ($pg.TargetFrameworkVersion) { $pg.TargetFrameworkVersion = "v4.0" }
           }
 
-          # Forçar 32 bits (x86), optimizações de Release e subsistema 5.01 (Windows XP)
           $overridePg = $xml.CreateElement("PropertyGroup", $ns)
           $props = [ordered]@{
-            "PlatformTarget"                     = "x86"
-            "Prefer32Bit"                        = "false"
-            "SubsystemVersion"                   = "5.01"
-            "Optimize"                           = "true"
-            "DebugType"                          = "none"
-            "DebugSymbols"                       = "false"
-            "AutoGenerateBindingRedirects"       = "true"
-            "GenerateBindingRedirectsOutputType" = "true"
+            "PlatformTarget"              = "x86"
+            "Prefer32Bit"                 = "false"
+            "SubsystemVersion"            = "5.01"
+            "Optimize"                    = "true"
+            "DebugType"                   = "none"
+            "DebugSymbols"                = "false"
+            "AutoUnifyAssemblyReferences" = "false"
+            "AppConfig"                   = "App.config"
           }
           foreach ($key in $props.Keys) {
             $el = $xml.CreateElement($key, $ns)
@@ -74,7 +145,6 @@ jobs:
             $r.ParentNode.RemoveChild($r) | Out-Null
           }
 
-          # Adicionar ReferenceAssemblies.net40 e Microsoft.Net.Http (se usado no código)
           $pkgGroup = $xml.CreateElement("ItemGroup", $ns)
 
           $refAsm = $xml.CreateElement("PackageReference", $ns)
@@ -83,9 +153,13 @@ jobs:
           $refAsm.SetAttribute("PrivateAssets", "All")
           $pkgGroup.AppendChild($refAsm) | Out-Null
 
+          $bclAsync = $xml.CreateElement("PackageReference", $ns)
+          $bclAsync.SetAttribute("Include", "Microsoft.Bcl.Async")
+          $bclAsync.SetAttribute("Version", "1.0.168")
+          $pkgGroup.AppendChild($bclAsync) | Out-Null
+
           $usesHttp = Get-ChildItem -Recurse -Filter "*.cs" | Select-String -Pattern "System\.Net\.Http|HttpClient" -Quiet
           if ($usesHttp) {
-            Write-Host "Detectado uso de System.Net.Http/HttpClient -> a adicionar Microsoft.Net.Http 2.2.29 (net40)."
             $netHttp = $xml.CreateElement("PackageReference", $ns)
             $netHttp.SetAttribute("Include", "Microsoft.Net.Http")
             $netHttp.SetAttribute("Version", "2.2.29")
@@ -94,9 +168,6 @@ jobs:
 
           $xml.Project.AppendChild($pkgGroup) | Out-Null
           $xml.Save((Resolve-Path $csprojPath))
-
-          Write-Host "=== Iso2God.csproj ajustado ==="
-          Get-Content $csprojPath
 
       - name: Compilar com MSBuild (VS 2022) e validar cabeçalhos
         working-directory: r4dius-src
@@ -121,9 +192,14 @@ jobs:
 
           $exePath = Join-Path $outDir "Iso2God.exe"
           if (-not (Test-Path $exePath)) { throw "Iso2God.exe não encontrado em $outDir" }
+          if (-not (Test-Path (Join-Path $outDir "Iso2God.exe.config"))) {
+            Copy-Item -Path "App.config" -Destination (Join-Path $outDir "Iso2God.exe.config") -Force
+          }
 
-          # Remover eventuais PDBs
           Get-ChildItem -Path $outDir -Filter "*.pdb" -Recurse | Remove-Item -Force
+
+          Write-Host "=== Ficheiros gerados ==="
+          Get-ChildItem -Path $outDir | Select-Object Name, Length
 
           Write-Host "=== CorFlags (Iso2God.exe) ==="
           if (Get-Command corflags.exe -ErrorAction SilentlyContinue) {
