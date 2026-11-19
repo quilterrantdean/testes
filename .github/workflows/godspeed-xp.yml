@@ -1,0 +1,161 @@
+name: Build GODspeed (Windows XP 32-bit)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build-xp-x86:
+    name: Build .NET 4.0 x86 (WinXP)
+    runs-on: windows-2022
+
+    steps:
+      - name: Clonar repositório 5T33Z0/godspeed
+        shell: pwsh
+        run: |
+          if (Test-Path src) { Remove-Item src -Recurse -Force }
+          git clone --depth 1 https://github.com/5T33Z0/godspeed.git src
+
+      - name: Instalar Reference Assemblies .NET Framework 4.0
+        shell: pwsh
+        run: |
+          $refDest = "C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0"
+          if (-not (Test-Path "$refDest\mscorlib.dll")) {
+            $nupkg = "$env:RUNNER_TEMP\net40ref.zip"
+            $extract = "$env:RUNNER_TEMP\net40ref"
+            Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.NETFramework.ReferenceAssemblies.net40/1.0.3" -OutFile $nupkg
+            Expand-Archive -Path $nupkg -DestinationPath $extract -Force
+            New-Item -ItemType Directory -Path $refDest -Force | Out-Null
+            Copy-Item -Path "$extract\build\.NETFramework\v4.0\*" -Destination $refDest -Recurse -Force
+          }
+
+      - name: Configurar MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Ajustar projectos para Windows XP (.NET 4.0 / x86)
+        shell: pwsh
+        run: |
+          $vcxprojs = Get-ChildItem -Path src -Recurse -Filter *.vcxproj
+          if ($vcxprojs) {
+            Write-Warning "Foram encontrados projectos C++ (.vcxproj) — poderão exigir toolset v141_xp."
+          }
+
+          Get-ChildItem -Path src -Recurse -Filter *.csproj | ForEach-Object {
+            $raw = Get-Content -Path $_.FullName -Raw
+            $updated = $raw -replace '<TargetFrameworkVersion>v4\.[5-9][^<]*</TargetFrameworkVersion>', '<TargetFrameworkVersion>v4.0</TargetFrameworkVersion>'
+            $updated = $updated -replace '<TargetFramework>net4[5-9]\d*</TargetFramework>', '<TargetFramework>net40</TargetFramework>'
+            $updated = $updated -replace '<Prefer32Bit>true</Prefer32Bit>', '<Prefer32Bit>false</Prefer32Bit>'
+            if ($updated -ne $raw) {
+              Write-Host "Ajustado para .NET 4.0: $($_.FullName)"
+              Set-Content -Path $_.FullName -Value $updated -Encoding UTF8
+            }
+          }
+
+          Get-ChildItem -Path src -Recurse -Include App.config,app.config | ForEach-Object {
+            $raw = Get-Content -Path $_.FullName -Raw
+            $updated = $raw -replace 'sku="\.NETFramework,Version=v4\.[5-9][^"]*"', 'sku=".NETFramework,Version=v4.0"'
+            if ($updated -ne $raw) {
+              Write-Host "Ajustado App.config para .NET 4.0: $($_.FullName)"
+              Set-Content -Path $_.FullName -Value $updated -Encoding UTF8
+            }
+          }
+
+      - name: Restaurar pacotes NuGet (se necessário)
+        shell: pwsh
+        run: |
+          $sln = Get-ChildItem -Path src -Recurse -Filter *.sln | Select-Object -First 1
+          if (-not $sln) { throw "Ficheiro .sln não encontrado." }
+
+          $csprojs = Get-ChildItem -Path src -Recurse -Filter *.csproj
+          $hasPackagesConfig = Get-ChildItem -Path src -Recurse -Filter packages.config
+          $hasPkgRef = if ($csprojs) { Select-String -Path $csprojs -Pattern 'PackageReference' -Quiet } else { $false }
+
+          if ($hasPackagesConfig -or $hasPkgRef) {
+            $nuget = "$env:RUNNER_TEMP\nuget.exe"
+            Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" -OutFile $nuget
+            & $nuget restore $sln.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Falha no nuget restore." }
+          }
+
+      - name: Compilar Release x86 (.NET 4.0)
+        shell: pwsh
+        run: |
+          $sln = Get-ChildItem -Path src -Recurse -Filter *.sln | Select-Object -First 1
+          if (-not $sln) { throw "Ficheiro .sln não encontrado." }
+
+          $slnText = Get-Content -Path $sln.FullName -Raw
+          if ($slnText -match 'Release\|x86') {
+            $slnPlatform = 'x86'
+          } elseif ($slnText -match 'Release\|Mixed Platforms') {
+            $slnPlatform = 'Mixed Platforms'
+          } else {
+            $slnPlatform = 'Any CPU'
+          }
+          Write-Host "Solution: $($sln.FullName) | Platform: $slnPlatform"
+
+          msbuild $sln.FullName `
+            /t:Rebuild `
+            /p:Configuration=Release `
+            /p:Platform="$slnPlatform" `
+            /p:PlatformTarget=x86 `
+            /p:TargetFrameworkVersion=v4.0 `
+            /p:Prefer32Bit=false `
+            /p:Optimize=true `
+            /p:DebugType=none `
+            /p:DebugSymbols=false `
+            /m
+
+          if ($LASTEXITCODE -ne 0) { throw "Falha na compilação MSBuild." }
+
+      - name: Empacotar e validar binários x86
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path src -Recurse -Filter "Neurotoxin.Godspeed.Shell.exe" |
+            Where-Object { $_.FullName -match '\\bin\\' -and $_.FullName -notmatch '\\obj\\' } |
+            Select-Object -First 1
+
+          if (-not $exe) {
+            $exe = Get-ChildItem -Path src -Recurse -Filter "*.exe" |
+              Where-Object { $_.FullName -match '\\bin\\' -and $_.FullName -notmatch '\\obj\\' -and $_.Name -notmatch 'vshost' } |
+              Select-Object -First 1
+          }
+          if (-not $exe) { throw "Executável compilado não encontrado." }
+
+          if (Test-Path dist) { Remove-Item dist -Recurse -Force }
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item -Path "$($exe.Directory.FullName)\*" -Destination dist -Recurse -Force
+
+          Get-ChildItem -Path dist -Recurse -Include *.pdb,*.vshost.* | Remove-Item -Force -ErrorAction SilentlyContinue
+
+          $outExe = Join-Path (Resolve-Path dist) $exe.Name
+          $asm = [System.Reflection.AssemblyName]::GetAssemblyName($outExe)
+          Write-Host "Binário principal: $($exe.Name) | Arquitectura: $($asm.ProcessorArchitecture)"
+          if ($asm.ProcessorArchitecture -ne [System.Reflection.ProcessorArchitecture]::X86) {
+            throw "Erro: arquitectura obtida foi $($asm.ProcessorArchitecture) em vez de X86."
+          }
+
+          $ngenLines = @(
+            '@echo off',
+            'echo A pre-compilar imagens nativas x86 (NGen) para este CPU...',
+            '"%SystemRoot%\Microsoft.NET\Framework\v4.0.30319\ngen.exe" install "%~dp0' + $exe.Name + '"',
+            'if errorlevel 1 (echo Execute com conta de Administrador.) else (echo Concluido!)',
+            'pause'
+          )
+          [System.IO.File]::WriteAllText(
+            (Join-Path (Resolve-Path dist) "optimizar-p4-xp-ngen.bat"),
+            ($ngenLines -join "`r`n") + "`r`n",
+            [System.Text.Encoding]::ASCII
+          )
+
+          Get-ChildItem -Path dist -Recurse | Select-Object FullName, Length
+
+      - name: Disponibilizar binários como Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: godspeed-winxp-x86
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90
