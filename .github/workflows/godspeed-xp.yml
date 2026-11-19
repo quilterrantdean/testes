@@ -17,7 +17,7 @@ jobs:
         shell: pwsh
         run: |
           if (Test-Path src) { Remove-Item src -Recurse -Force }
-          git clone --depth 1 https://github.com/5T33Z0/godspeed.git src
+          git clone --depth 1 https://github.com/mercenaryntx/godspeed.git src
 
       - name: Instalar Reference Assemblies .NET Framework 4.0
         shell: pwsh
