@@ -32,24 +32,58 @@ jobs:
             Copy-Item -Path "$extract\build\.NETFramework\v4.0\*" -Destination $refDest -Recurse -Force
           }
 
+      - name: Descarregar SharpCompress 0.14.1 (.NET 4.0)
+        shell: pwsh
+        run: |
+          $scPkg = "$env:RUNNER_TEMP\sharpcompress.0.14.1.nupkg"
+          $scExt = "$env:RUNNER_TEMP\sharpcompress0141"
+          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/SharpCompress/0.14.1" -OutFile $scPkg
+          Expand-Archive -Path $scPkg -DestinationPath $scExt -Force
+
+          $scDll = Get-ChildItem -Path "$scExt\lib" -Recurse -Filter "SharpCompress.dll" |
+            Sort-Object {
+              if ($_.FullName -match '\\net40\\') { 0 }
+              elseif ($_.FullName -match '\\net40-client\\') { 1 }
+              elseif ($_.FullName -match '\\net35\\') { 2 }
+              else { 9 }
+            } | Select-Object -First 1
+
+          if (-not $scDll) { throw "SharpCompress.dll para .NET 4.0 não encontrada." }
+          $scDestDir = Join-Path (Resolve-Path src) "SharpCompress_net40"
+          New-Item -ItemType Directory -Path $scDestDir -Force | Out-Null
+          Copy-Item -Path $scDll.FullName -Destination $scDestDir -Force
+          Write-Host "SharpCompress copiado de: $($scDll.FullName)"
+
       - name: Configurar MSBuild
         uses: microsoft/setup-msbuild@v3
 
-      - name: Ajustar projectos para Windows XP (.NET 4.0 / x86)
+      - name: Ajustar projectos para Windows XP (.NET 4.0 / x86 / ValueTuple)
         shell: pwsh
         run: |
-          $vcxprojs = Get-ChildItem -Path src -Recurse -Filter *.vcxproj
-          if ($vcxprojs) {
-            Write-Warning "Foram encontrados projectos C++ (.vcxproj) — poderão exigir toolset v141_xp."
+          $sln = Get-ChildItem -Path src -Recurse -Filter *.sln | Select-Object -First 1
+          if (-not $sln) { throw "Ficheiro .sln não encontrado." }
+
+          # Remover SharpCompress moderno da solution
+          $slnText = Get-Content -Path $sln.FullName -Raw
+          if ($slnText -match '(?ms)^Project\([^\r\n]+\)\s*=\s*"SharpCompress",\s*"[^"]+",\s*"(\{[^"]+\})".*?^EndProject\r?\n') {
+            $scGuid = [regex]::Escape($Matches[1])
+            $slnText = $slnText -replace '(?ms)^Project\([^\r\n]+\)\s*=\s*"SharpCompress".*?^EndProject\r?\n', ''
+            $slnText = $slnText -replace "(?m)^[^\r\n]*$scGuid[^\r\n]*\r?\n", ''
+            Set-Content -Path $sln.FullName -Value $slnText -Encoding UTF8
+            Write-Host "Removido SharpCompress moderno da solution."
           }
 
-          Get-ChildItem -Path src -Recurse -Filter *.csproj | ForEach-Object {
+          $scHintPath = Join-Path (Resolve-Path src) "SharpCompress_net40\SharpCompress.dll"
+          $scRefBlock = "<Reference Include=`"SharpCompress`">`r`n      <HintPath>$scHintPath</HintPath>`r`n      <Private>True</Private>`r`n    </Reference>"
+
+          Get-ChildItem -Path src -Recurse -Filter *.csproj | Where-Object { $_.FullName -notmatch '\\sharpcompress\\' } | ForEach-Object {
             $raw = Get-Content -Path $_.FullName -Raw
             $updated = $raw -replace '<TargetFrameworkVersion>v4\.[5-9][^<]*</TargetFrameworkVersion>', '<TargetFrameworkVersion>v4.0</TargetFrameworkVersion>'
             $updated = $updated -replace '<TargetFramework>net4[5-9]\d*</TargetFramework>', '<TargetFramework>net40</TargetFramework>'
             $updated = $updated -replace '<Prefer32Bit>true</Prefer32Bit>', '<Prefer32Bit>false</Prefer32Bit>'
+            $updated = $updated -replace '(?ms)<ProjectReference\s+Include="[^"]*SharpCompress\.csproj"(?:\s*/>|[^>]*>.*?</ProjectReference>)', $scRefBlock
             if ($updated -ne $raw) {
-              Write-Host "Ajustado para .NET 4.0: $($_.FullName)"
+              Write-Host "Ajustado csproj: $($_.FullName)"
               Set-Content -Path $_.FullName -Value $updated -Encoding UTF8
             }
           }
@@ -58,27 +92,202 @@ jobs:
             $raw = Get-Content -Path $_.FullName -Raw
             $updated = $raw -replace 'sku="\.NETFramework,Version=v4\.[5-9][^"]*"', 'sku=".NETFramework,Version=v4.0"'
             if ($updated -ne $raw) {
-              Write-Host "Ajustado App.config para .NET 4.0: $($_.FullName)"
+              Write-Host "Ajustado App.config: $($_.FullName)"
               Set-Content -Path $_.FullName -Value $updated -Encoding UTF8
             }
           }
 
-      - name: Restaurar pacotes NuGet (se necessário)
+          # Polyfill System.ValueTuple para .NET 4.0 em Neurotoxin.Godspeed.Core
+          $coreProj = Get-ChildItem -Path src -Recurse -Filter "Neurotoxin.Godspeed.Core.csproj" | Select-Object -First 1
+          if (-not $coreProj) { throw "Neurotoxin.Godspeed.Core.csproj não encontrado." }
+
+          $polyfillCode = @'
+          using System;
+          using System.Collections.Generic;
+
+          namespace System.Runtime.CompilerServices
+          {
+              [AttributeUsage(AttributeTargets.Field | AttributeTargets.Parameter | AttributeTargets.Property | AttributeTargets.ReturnValue | AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Event)]
+              public sealed class TupleElementNamesAttribute : Attribute
+              {
+                  private readonly string[] _transformNames;
+                  public TupleElementNamesAttribute(string[] transformNames)
+                  {
+                      if (transformNames == null) throw new ArgumentNullException("transformNames");
+                      _transformNames = transformNames;
+                  }
+                  public IList<string> TransformNames { get { return _transformNames; } }
+              }
+          }
+
+          namespace System
+          {
+              internal static class TupleHashHelper
+              {
+                  internal static int Combine(int h1, int h2)
+                  {
+                      unchecked
+                      {
+                          uint rol5 = ((uint)h1 << 5) | ((uint)h1 >> 27);
+                          return ((int)rol5 + h1) ^ h2;
+                      }
+                  }
+              }
+
+              public struct ValueTuple : IEquatable<ValueTuple>, IComparable, IComparable<ValueTuple>
+              {
+                  public bool Equals(ValueTuple other) { return true; }
+                  public override bool Equals(object obj) { return obj is ValueTuple; }
+                  public override int GetHashCode() { return 0; }
+                  public int CompareTo(ValueTuple other) { return 0; }
+                  public int CompareTo(object other)
+                  {
+                      if (other == null) return 1;
+                      if (!(other is ValueTuple)) throw new ArgumentException();
+                      return 0;
+                  }
+                  public override string ToString() { return "()"; }
+                  public static ValueTuple Create() { return default(ValueTuple); }
+                  public static ValueTuple<T1> Create<T1>(T1 item1) { return new ValueTuple<T1>(item1); }
+                  public static ValueTuple<T1, T2> Create<T1, T2>(T1 item1, T2 item2) { return new ValueTuple<T1, T2>(item1, item2); }
+                  public static ValueTuple<T1, T2, T3> Create<T1, T2, T3>(T1 item1, T2 item2, T3 item3) { return new ValueTuple<T1, T2, T3>(item1, item2, item3); }
+                  public static ValueTuple<T1, T2, T3, T4> Create<T1, T2, T3, T4>(T1 item1, T2 item2, T3 item3, T4 item4) { return new ValueTuple<T1, T2, T3, T4>(item1, item2, item3, item4); }
+              }
+
+              public struct ValueTuple<T1> : IEquatable<ValueTuple<T1>>, IComparable, IComparable<ValueTuple<T1>>
+              {
+                  public T1 Item1;
+                  public ValueTuple(T1 item1) { Item1 = item1; }
+                  public bool Equals(ValueTuple<T1> other) { return EqualityComparer<T1>.Default.Equals(Item1, other.Item1); }
+                  public override bool Equals(object obj) { return obj is ValueTuple<T1> && Equals((ValueTuple<T1>)obj); }
+                  public override int GetHashCode() { return EqualityComparer<T1>.Default.GetHashCode(Item1); }
+                  public int CompareTo(ValueTuple<T1> other) { return Comparer<T1>.Default.Compare(Item1, other.Item1); }
+                  public int CompareTo(object other)
+                  {
+                      if (other == null) return 1;
+                      if (!(other is ValueTuple<T1>)) throw new ArgumentException();
+                      return CompareTo((ValueTuple<T1>)other);
+                  }
+                  public override string ToString() { return "(" + Item1 + ")"; }
+              }
+
+              public struct ValueTuple<T1, T2> : IEquatable<ValueTuple<T1, T2>>, IComparable, IComparable<ValueTuple<T1, T2>>
+              {
+                  public T1 Item1;
+                  public T2 Item2;
+                  public ValueTuple(T1 item1, T2 item2) { Item1 = item1; Item2 = item2; }
+                  public bool Equals(ValueTuple<T1, T2> other)
+                  {
+                      return EqualityComparer<T1>.Default.Equals(Item1, other.Item1) && EqualityComparer<T2>.Default.Equals(Item2, other.Item2);
+                  }
+                  public override bool Equals(object obj) { return obj is ValueTuple<T1, T2> && Equals((ValueTuple<T1, T2>)obj); }
+                  public override int GetHashCode()
+                  {
+                      return TupleHashHelper.Combine(EqualityComparer<T1>.Default.GetHashCode(Item1), EqualityComparer<T2>.Default.GetHashCode(Item2));
+                  }
+                  public int CompareTo(ValueTuple<T1, T2> other)
+                  {
+                      int c = Comparer<T1>.Default.Compare(Item1, other.Item1);
+                      return c != 0 ? c : Comparer<T2>.Default.Compare(Item2, other.Item2);
+                  }
+                  public int CompareTo(object other)
+                  {
+                      if (other == null) return 1;
+                      if (!(other is ValueTuple<T1, T2>)) throw new ArgumentException();
+                      return CompareTo((ValueTuple<T1, T2>)other);
+                  }
+                  public override string ToString() { return "(" + Item1 + ", " + Item2 + ")"; }
+              }
+
+              public struct ValueTuple<T1, T2, T3> : IEquatable<ValueTuple<T1, T2, T3>>, IComparable, IComparable<ValueTuple<T1, T2, T3>>
+              {
+                  public T1 Item1;
+                  public T2 Item2;
+                  public T3 Item3;
+                  public ValueTuple(T1 item1, T2 item2, T3 item3) { Item1 = item1; Item2 = item2; Item3 = item3; }
+                  public bool Equals(ValueTuple<T1, T2, T3> other)
+                  {
+                      return EqualityComparer<T1>.Default.Equals(Item1, other.Item1) && EqualityComparer<T2>.Default.Equals(Item2, other.Item2) && EqualityComparer<T3>.Default.Equals(Item3, other.Item3);
+                  }
+                  public override bool Equals(object obj) { return obj is ValueTuple<T1, T2, T3> && Equals((ValueTuple<T1, T2, T3>)obj); }
+                  public override int GetHashCode()
+                  {
+                      int h = TupleHashHelper.Combine(EqualityComparer<T1>.Default.GetHashCode(Item1), EqualityComparer<T2>.Default.GetHashCode(Item2));
+                      return TupleHashHelper.Combine(h, EqualityComparer<T3>.Default.GetHashCode(Item3));
+                  }
+                  public int CompareTo(ValueTuple<T1, T2, T3> other)
+                  {
+                      int c = Comparer<T1>.Default.Compare(Item1, other.Item1);
+                      if (c != 0) return c;
+                      c = Comparer<T2>.Default.Compare(Item2, other.Item2);
+                      return c != 0 ? c : Comparer<T3>.Default.Compare(Item3, other.Item3);
+                  }
+                  public int CompareTo(object other)
+                  {
+                      if (other == null) return 1;
+                      if (!(other is ValueTuple<T1, T2, T3>)) throw new ArgumentException();
+                      return CompareTo((ValueTuple<T1, T2, T3>)other);
+                  }
+                  public override string ToString() { return "(" + Item1 + ", " + Item2 + ", " + Item3 + ")"; }
+              }
+
+              public struct ValueTuple<T1, T2, T3, T4> : IEquatable<ValueTuple<T1, T2, T3, T4>>, IComparable, IComparable<ValueTuple<T1, T2, T3, T4>>
+              {
+                  public T1 Item1;
+                  public T2 Item2;
+                  public T3 Item3;
+                  public T4 Item4;
+                  public ValueTuple(T1 item1, T2 item2, T3 item3, T4 item4) { Item1 = item1; Item2 = item2; Item3 = item3; Item4 = item4; }
+                  public bool Equals(ValueTuple<T1, T2, T3, T4> other)
+                  {
+                      return EqualityComparer<T1>.Default.Equals(Item1, other.Item1) && EqualityComparer<T2>.Default.Equals(Item2, other.Item2) && EqualityComparer<T3>.Default.Equals(Item3, other.Item3) && EqualityComparer<T4>.Default.Equals(Item4, other.Item4);
+                  }
+                  public override bool Equals(object obj) { return obj is ValueTuple<T1, T2, T3, T4> && Equals((ValueTuple<T1, T2, T3, T4>)obj); }
+                  public override int GetHashCode()
+                  {
+                      int h = TupleHashHelper.Combine(EqualityComparer<T1>.Default.GetHashCode(Item1), EqualityComparer<T2>.Default.GetHashCode(Item2));
+                      h = TupleHashHelper.Combine(h, EqualityComparer<T3>.Default.GetHashCode(Item3));
+                      return TupleHashHelper.Combine(h, EqualityComparer<T4>.Default.GetHashCode(Item4));
+                  }
+                  public int CompareTo(ValueTuple<T1, T2, T3, T4> other)
+                  {
+                      int c = Comparer<T1>.Default.Compare(Item1, other.Item1);
+                      if (c != 0) return c;
+                      c = Comparer<T2>.Default.Compare(Item2, other.Item2);
+                      if (c != 0) return c;
+                      c = Comparer<T3>.Default.Compare(Item3, other.Item3);
+                      return c != 0 ? c : Comparer<T4>.Default.Compare(Item4, other.Item4);
+                  }
+                  public int CompareTo(object other)
+                  {
+                      if (other == null) return 1;
+                      if (!(other is ValueTuple<T1, T2, T3, T4>)) throw new ArgumentException();
+                      return CompareTo((ValueTuple<T1, T2, T3, T4>)other);
+                  }
+                  public override string ToString() { return "(" + Item1 + ", " + Item2 + ", " + Item3 + ", " + Item4 + ")"; }
+              }
+          }
+          '@
+
+          $polyfillPath = Join-Path $coreProj.DirectoryName "ValueTuplePolyfill.cs"
+          [System.IO.File]::WriteAllText($polyfillPath, $polyfillCode, [System.Text.Encoding]::UTF8)
+
+          $coreText = Get-Content -Path $coreProj.FullName -Raw
+          if ($coreText -notmatch 'ValueTuplePolyfill\.cs') {
+            $coreText = $coreText -replace '<Compile Include="Properties\\AssemblyInfo\.cs"\s*/>', "<Compile Include=`"Properties\AssemblyInfo.cs`" />`r`n    <Compile Include=`"ValueTuplePolyfill.cs`" />"
+            Set-Content -Path $coreProj.FullName -Value $coreText -Encoding UTF8
+          }
+
+      - name: Restaurar pacotes NuGet
         shell: pwsh
         run: |
           $sln = Get-ChildItem -Path src -Recurse -Filter *.sln | Select-Object -First 1
           if (-not $sln) { throw "Ficheiro .sln não encontrado." }
 
-          $csprojs = Get-ChildItem -Path src -Recurse -Filter *.csproj
-          $hasPackagesConfig = Get-ChildItem -Path src -Recurse -Filter packages.config
-          $hasPkgRef = if ($csprojs) { Select-String -Path $csprojs -Pattern 'PackageReference' -Quiet } else { $false }
-
-          if ($hasPackagesConfig -or $hasPkgRef) {
-            $nuget = "$env:RUNNER_TEMP\nuget.exe"
-            Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" -OutFile $nuget
-            & $nuget restore $sln.FullName
-            if ($LASTEXITCODE -ne 0) { throw "Falha no nuget restore." }
-          }
+          $nuget = "$env:RUNNER_TEMP\nuget.exe"
+          Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" -OutFile $nuget
+          & $nuget restore $sln.FullName
+          if ($LASTEXITCODE -ne 0) { throw "Falha no nuget restore." }
 
       - name: Compilar Release x86 (.NET 4.0)
         shell: pwsh
@@ -101,7 +310,6 @@ jobs:
             /p:Configuration=Release `
             /p:Platform="$slnPlatform" `
             /p:PlatformTarget=x86 `
-            /p:TargetFrameworkVersion=v4.0 `
             /p:Prefer32Bit=false `
             /p:Optimize=true `
             /p:DebugType=none `
